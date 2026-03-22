@@ -19,6 +19,7 @@ Data sources:
   - BLS (Bureau of Labor Statistics) — release schedules and data
   - Federal Reserve — FOMC statements, dot plots, minutes
 """
+from __future__ import annotations
 import requests
 from datetime import datetime, timezone, timedelta
 from kalshi_client import KalshiClient

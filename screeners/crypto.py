@@ -15,11 +15,17 @@ Contract structure on Kalshi:
   - Series tickers like KXBTC (BTC), KXETH (ETH), KXSOL (SOL)
   - Settlement: CF Benchmarks Real-Time Index, 60-second average at expiry
 """
+from __future__ import annotations
+import json
 import math
+import os
 from datetime import datetime, timezone, timedelta
 import requests
 from kalshi_client import KalshiClient
 import config
+
+VOL_CACHE_FILE = os.path.join("data", "vol_cache.json")
+VOL_CACHE_MAX_AGE_SECONDS = 4 * 3600  # 4 hours
 
 
 class CryptoScreener:
@@ -59,6 +65,9 @@ class CryptoScreener:
 
             # Get historical daily volatility (30-day realized vol)
             vol = self._get_realized_vol(ticker)
+            if vol is None:
+                print(f"Skipping {ticker}: no vol data available (API down, cache stale)")
+                continue
 
             # Fetch open markets in this series
             try:
@@ -97,13 +106,14 @@ class CryptoScreener:
             print(f"CoinGecko price fetch failed for {ticker}: {e}")
             return None
 
-    def _get_realized_vol(self, ticker: str, days: int = 30) -> float:
+    def _get_realized_vol(self, ticker: str, days: int = 30) -> float | None:
         """
         Fetch 30-day realized volatility from CoinGecko.
-        Returns annualized volatility as a decimal (e.g., 0.65 = 65%).
+        Returns annualized volatility as a decimal (e.g., 0.65 = 65%),
+        or None if data is unavailable and cache is stale (>4h).
 
-        This is a crude but functional baseline. For production, you'd want
-        to pull from your own data pipeline or use implied vol from options.
+        On success, caches the result to data/vol_cache.json.
+        On failure, falls back to cached value if fresh enough.
         """
         coin_ids = {"BTC": "bitcoin", "ETH": "ethereum", "SOL": "solana"}
         coin_id = coin_ids.get(ticker, "bitcoin")
@@ -116,17 +126,57 @@ class CryptoScreener:
             )
             prices = resp.json().get("prices", [])
             if len(prices) < 10:
-                return 0.70  # Default fallback: 70% annualized vol
+                return self._read_vol_cache(ticker)
 
-            # Calculate daily log returns
             closes = [p[1] for p in prices]
             log_returns = [math.log(closes[i] / closes[i-1]) for i in range(1, len(closes))]
             daily_vol = (sum(r**2 for r in log_returns) / len(log_returns)) ** 0.5
             annualized_vol = daily_vol * math.sqrt(365)
+
+            self._write_vol_cache(ticker, annualized_vol)
             return annualized_vol
 
-        except Exception:
-            return 0.70  # Conservative fallback
+        except Exception as e:
+            print(f"CoinGecko vol fetch failed for {ticker}: {e}")
+            return self._read_vol_cache(ticker)
+
+    def _read_vol_cache(self, ticker: str) -> float | None:
+        """Read cached vol for a ticker. Returns None if missing or stale (>4h)."""
+        try:
+            with open(VOL_CACHE_FILE, "r") as f:
+                cache = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            return None
+
+        entry = cache.get(ticker)
+        if entry is None:
+            return None
+
+        cached_time = datetime.fromisoformat(entry["timestamp"])
+        age = (datetime.now(timezone.utc) - cached_time).total_seconds()
+        if age > VOL_CACHE_MAX_AGE_SECONDS:
+            print(f"Vol cache for {ticker} is stale ({age/3600:.1f}h old), skipping")
+            return None
+
+        print(f"Using cached vol for {ticker}: {entry['vol']:.4f} ({age/60:.0f}m old)")
+        return entry["vol"]
+
+    def _write_vol_cache(self, ticker: str, vol: float) -> None:
+        """Write vol to cache file."""
+        try:
+            with open(VOL_CACHE_FILE, "r") as f:
+                cache = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            cache = {}
+
+        cache[ticker] = {
+            "vol": round(vol, 6),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+
+        os.makedirs(os.path.dirname(VOL_CACHE_FILE), exist_ok=True)
+        with open(VOL_CACHE_FILE, "w") as f:
+            json.dump(cache, f, indent=2)
 
     def _is_target_timeframe(self, market: dict) -> bool:
         """

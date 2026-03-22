@@ -22,7 +22,8 @@ import config
 
 
 def kelly_size(your_prob: float, market_prob: float,
-               category_bankroll: float, side: str = "yes") -> dict:
+               category_bankroll: float, side: str = "yes",
+               kelly_override: float = None) -> dict:
     """
     Calculate the optimal position size for a Kalshi contract.
 
@@ -74,7 +75,8 @@ def kelly_size(your_prob: float, market_prob: float,
     full_kelly = edge / (1 - market_prob) if market_prob < 1.0 else 0
 
     # Apply fractional Kelly — trade a fraction of the theoretical optimum
-    fractional_kelly = full_kelly * config.KELLY_FRACTION
+    kelly_frac = kelly_override if kelly_override is not None else config.KELLY_FRACTION
+    fractional_kelly = full_kelly * kelly_frac
 
     # Safety cap: never risk more than MAX_BET_FRACTION of category bankroll
     capped_fraction = min(fractional_kelly, config.MAX_BET_FRACTION)

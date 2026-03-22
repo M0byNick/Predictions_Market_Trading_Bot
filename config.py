@@ -57,6 +57,13 @@ ECON_EVENTS = [
 # FRED API key (free from https://fred.stlouisfed.org/docs/api/api_key.html)
 FRED_API_KEY = ""
 
+# ── Economics Screener Overrides ─────────────────────────────────────────
+# Economics edge estimates are heuristic, not model-driven.
+# Default to alert-only: send Telegram notifications but do not execute.
+ECON_ALERT_ONLY = True
+# If overridden to auto-trade, use a much smaller Kelly fraction.
+ECON_MAX_KELLY_FRACTION = 0.10  # vs 0.25 for crypto/weather
+
 # ── Trade Execution ──────────────────────────────────────────────────────────
 # If True, the bot will send Telegram alerts and wait for your approval
 # before placing orders. If False, it auto-executes (use with caution).

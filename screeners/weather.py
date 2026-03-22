@@ -21,6 +21,7 @@ Settlement:
   This means the NWS's own data is the ground truth — giving us a huge
   advantage when we use NWS forecasts as our probability model.
 """
+from __future__ import annotations
 import requests
 from datetime import datetime, timezone, timedelta
 from kalshi_client import KalshiClient

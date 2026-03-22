@@ -82,17 +82,41 @@ def process_opportunity(opp: dict, alerter: TelegramAlerter,
     category = opp["category"]
     cat_bankroll = category_bankroll(category)
 
+    # Economics uses a reduced Kelly fraction due to heuristic edge estimates
+    kelly_ovr = config.ECON_MAX_KELLY_FRACTION if category == "economics" else None
+
     # Calculate position sizing
     sizing = kelly_size(
         your_prob=opp["your_prob"],
         market_prob=opp["market_prob"],
         category_bankroll=cat_bankroll,
         side=opp["side"],
+        kelly_override=kelly_ovr,
     )
 
     # If Kelly says no trade, skip silently
     if sizing["action"] in ("no_trade", "skip"):
         print(f"   ⏭  {opp['ticker']}: {sizing['reason']}")
+        return False
+
+    # Economics alert-only mode: notify but do not execute
+    if category == "economics" and config.ECON_ALERT_ONLY:
+        print(f"\n   {'─' * 50}")
+        print(f"   📊 [ALERT ONLY] {opp['title']}")
+        print(f"   Ticker: {opp['ticker']}")
+        print(f"   Side: {opp['side'].upper()} | Edge: {opp['edge']:.1%}")
+        print(f"   Suggested size: {sizing['recommended_contracts']} contracts (${sizing['recommended_usd']})")
+        print(f"   Rationale: {opp.get('rationale', 'N/A')}")
+        print(f"   ⚠️  Economics is alert-only (ECON_ALERT_ONLY=True). No trade placed.")
+        print(f"   {'─' * 50}")
+        alerter.send(
+            f"📊 <b>[ALERT ONLY — Economics]</b>\n"
+            f"{opp.get('title', opp['ticker'])}\n"
+            f"Side: {opp['side'].upper()} | Edge: {opp['edge']:.1%}\n"
+            f"Suggested: {sizing['recommended_contracts']} contracts (${sizing['recommended_usd']})\n"
+            f"{opp.get('rationale', '')}\n"
+            f"⚠️ Not auto-executing — set ECON_ALERT_ONLY=False to enable."
+        )
         return False
 
     # Print the opportunity to console
@@ -140,15 +164,43 @@ def process_opportunity(opp: dict, alerter: TelegramAlerter,
         )
         print(f"   ✅ Order placed: {order_result}")
 
-        # Log the trade
+        # Check fill status
+        actual_contracts = sizing["recommended_contracts"]
+        actual_cost = sizing["recommended_usd"]
+        order_id = order_result.get("order", {}).get("order_id")
+
+        if order_id:
+            try:
+                order_status = client.get_order(order_id)
+                order_data = order_status.get("order", order_status)
+                status = order_data.get("status", "unknown")
+                remaining = order_data.get("remaining_count", 0)
+                filled = actual_contracts - remaining
+
+                if status == "canceled" or filled == 0:
+                    msg = f"Order {order_id} was not filled (status: {status})"
+                    print(f"   ⚠️  {msg}")
+                    alerter.send(f"⚠️ {msg}")
+                    return False
+
+                if filled < actual_contracts:
+                    actual_contracts = filled
+                    actual_cost = round(actual_cost * (filled / sizing["recommended_contracts"]), 2)
+                    msg = f"Partial fill: {filled}/{sizing['recommended_contracts']} contracts"
+                    print(f"   ⚠️  {msg}")
+                    alerter.send(f"⚠️ {msg}")
+            except Exception as e:
+                print(f"   ⚠️  Fill check failed (logging requested qty): {e}")
+
+        # Log the trade with actual filled quantities
         tracker.log_trade(
             ticker=opp["ticker"],
             category=category,
             side=opp["side"],
             your_prob=opp["your_prob"],
             market_prob=opp["market_prob"],
-            num_contracts=sizing["recommended_contracts"],
-            cost_usd=sizing["recommended_usd"],
+            num_contracts=actual_contracts,
+            cost_usd=actual_cost,
             kelly_fraction=sizing["capped_fraction"],
             notes=opp.get("rationale", ""),
         )
@@ -156,8 +208,8 @@ def process_opportunity(opp: dict, alerter: TelegramAlerter,
         # Confirm via Telegram
         alerter.send_execution_confirmation(
             ticker=opp["ticker"],
-            num_contracts=sizing["recommended_contracts"],
-            cost_usd=sizing["recommended_usd"],
+            num_contracts=actual_contracts,
+            cost_usd=actual_cost,
         )
 
         return True

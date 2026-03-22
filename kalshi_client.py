@@ -3,6 +3,7 @@ Kalshi REST API client.
 Handles RSA-based authentication, market data retrieval, and order management.
 Reference: https://trading-api.readme.io/reference
 """
+from __future__ import annotations
 import time
 import json
 import base64
@@ -141,6 +142,13 @@ class KalshiClient:
     def cancel_order(self, order_id: str) -> dict:
         """Cancel an open order by ID."""
         return self._post(f"/portfolio/orders/{order_id}/cancel", {})
+
+    def get_order(self, order_id: str) -> dict:
+        """
+        Get the status of a specific order.
+        Returns order details including status and fill information.
+        """
+        return self._get(f"/portfolio/orders/{order_id}")
 
     def get_positions(self) -> dict:
         """Get all current open positions in your portfolio."""
