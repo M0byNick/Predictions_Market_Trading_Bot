@@ -13,6 +13,7 @@ Setup:
 import time
 import requests
 import config
+from log import logger
 
 
 class TelegramAlerter:
@@ -38,7 +39,7 @@ class TelegramAlerter:
             )
             return resp.status_code == 200
         except Exception as e:
-            print(f"Telegram send failed: {e}")
+            logger.error("Telegram send failed: %s", e)
             return False
 
     def send_trade_alert(self, ticker: str, category: str, side: str,
@@ -126,7 +127,7 @@ class TelegramAlerter:
                         return False
 
             except Exception as e:
-                print(f"Telegram poll error: {e}")
+                logger.error("Telegram poll error: %s", e)
                 time.sleep(5)
 
         return None  # Timed out
@@ -140,4 +141,4 @@ class TelegramAlerter:
         updates = resp.json().get("result", [])
         for update in updates:
             chat = update.get("message", {}).get("chat", {})
-            print(f"Chat ID: {chat.get('id')} | Name: {chat.get('first_name', '')}")
+            logger.info("Chat ID: %s | Name: %s", chat.get('id'), chat.get('first_name', ''))

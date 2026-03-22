@@ -1,16 +1,30 @@
 """
 Configuration for the Kalshi prediction market bot.
-Fill in your credentials and adjust strategy parameters below.
+
+Secrets are loaded from environment variables (or a .env file).
+Strategy parameters are set below and can be tuned without touching secrets.
 """
+import os
+from pathlib import Path
+
+# Load .env file if present (no dependency required)
+_env_file = Path(__file__).parent / ".env"
+if _env_file.exists():
+    for line in _env_file.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        os.environ.setdefault(key.strip(), value.strip().strip("'\""))
 
 # ── Kalshi API ───────────────────────────────────────────────────────────────
 KALSHI_API_BASE = "https://api.elections.kalshi.com/trade-api/v2"
-KALSHI_EMAIL = ""           # Your Kalshi login email
-KALSHI_PRIVATE_KEY_PATH = "kalshi_private_key.pem"  # RSA private key file
+KALSHI_EMAIL = os.environ.get("KALSHI_EMAIL", "")
+KALSHI_PRIVATE_KEY_PATH = os.environ.get("KALSHI_PRIVATE_KEY_PATH", "kalshi_private_key.pem")
 
 # ── Telegram Alerts ──────────────────────────────────────────────────────────
-TELEGRAM_BOT_TOKEN = ""     # From @BotFather
-TELEGRAM_CHAT_ID = ""       # Your personal chat ID
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 
 # ── Bankroll & Allocation ────────────────────────────────────────────────────
 TOTAL_BANKROLL = 5000       # Starting bankroll in USD
@@ -55,7 +69,7 @@ ECON_EVENTS = [
     "UNEMPLOYMENT", # Unemployment rate
 ]
 # FRED API key (free from https://fred.stlouisfed.org/docs/api/api_key.html)
-FRED_API_KEY = ""
+FRED_API_KEY = os.environ.get("FRED_API_KEY", "")
 
 # ── Economics Screener Overrides ─────────────────────────────────────────
 # Economics edge estimates are heuristic, not model-driven.
@@ -63,6 +77,11 @@ FRED_API_KEY = ""
 ECON_ALERT_ONLY = True
 # If overridden to auto-trade, use a much smaller Kelly fraction.
 ECON_MAX_KELLY_FRACTION = 0.10  # vs 0.25 for crypto/weather
+
+# ── Paper Trading ────────────────────────────────────────────────────────────
+# If True, orders are simulated locally — real market data, fake fills.
+# Tracks balance and positions in data/paper_trades.json.
+PAPER_TRADING = True  # Set to False for live trading
 
 # ── Trade Execution ──────────────────────────────────────────────────────────
 # If True, the bot will send Telegram alerts and wait for your approval

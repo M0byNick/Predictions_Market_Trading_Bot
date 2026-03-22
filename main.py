@@ -13,7 +13,6 @@ Usage:
 """
 import sys
 import time
-import traceback
 from datetime import datetime, timezone
 
 from kalshi_client import KalshiClient
@@ -24,6 +23,7 @@ from screeners.crypto import CryptoScreener
 from screeners.weather import WeatherScreener
 from screeners.economics import EconomicsScreener
 import config
+from log import logger
 
 
 def run_screeners(client: KalshiClient, crypto: CryptoScreener,
@@ -31,39 +31,34 @@ def run_screeners(client: KalshiClient, crypto: CryptoScreener,
     """Run all three screeners and collect opportunities."""
     all_opps = []
 
-    print(f"\n{'═' * 60}")
-    print(f"  Screening at {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}")
-    print(f"{'═' * 60}")
+    logger.info("Screening at %s", datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC'))
 
     # Crypto screener — 50% allocation, highest expected edge
-    print("\n₿  Scanning crypto markets...")
+    logger.info("Scanning crypto markets...")
     try:
         crypto_opps = crypto.screen()
-        print(f"   Found {len(crypto_opps)} opportunities")
+        logger.info("Crypto: %d opportunities", len(crypto_opps))
         all_opps.extend(crypto_opps)
-    except Exception as e:
-        print(f"   Crypto screener error: {e}")
-        traceback.print_exc()
+    except Exception:
+        logger.error("Crypto screener error", exc_info=True)
 
     # Weather screener — 30% allocation, NWS-based edge
-    print("\n🌡  Scanning weather markets...")
+    logger.info("Scanning weather markets...")
     try:
         weather_opps = weather.screen()
-        print(f"   Found {len(weather_opps)} opportunities")
+        logger.info("Weather: %d opportunities", len(weather_opps))
         all_opps.extend(weather_opps)
-    except Exception as e:
-        print(f"   Weather screener error: {e}")
-        traceback.print_exc()
+    except Exception:
+        logger.error("Weather screener error", exc_info=True)
 
     # Economics screener — 20% allocation, conservative/manual review
-    print("\n📈 Scanning economics markets...")
+    logger.info("Scanning economics markets...")
     try:
         econ_opps = economics.screen()
-        print(f"   Found {len(econ_opps)} opportunities")
+        logger.info("Economics: %d opportunities", len(econ_opps))
         all_opps.extend(econ_opps)
-    except Exception as e:
-        print(f"   Economics screener error: {e}")
-        traceback.print_exc()
+    except Exception:
+        logger.error("Economics screener error", exc_info=True)
 
     return all_opps
 
@@ -96,19 +91,13 @@ def process_opportunity(opp: dict, alerter: TelegramAlerter,
 
     # If Kelly says no trade, skip silently
     if sizing["action"] in ("no_trade", "skip"):
-        print(f"   ⏭  {opp['ticker']}: {sizing['reason']}")
+        logger.debug("Skip %s: %s", opp['ticker'], sizing['reason'])
         return False
 
     # Economics alert-only mode: notify but do not execute
     if category == "economics" and config.ECON_ALERT_ONLY:
-        print(f"\n   {'─' * 50}")
-        print(f"   📊 [ALERT ONLY] {opp['title']}")
-        print(f"   Ticker: {opp['ticker']}")
-        print(f"   Side: {opp['side'].upper()} | Edge: {opp['edge']:.1%}")
-        print(f"   Suggested size: {sizing['recommended_contracts']} contracts (${sizing['recommended_usd']})")
-        print(f"   Rationale: {opp.get('rationale', 'N/A')}")
-        print(f"   ⚠️  Economics is alert-only (ECON_ALERT_ONLY=True). No trade placed.")
-        print(f"   {'─' * 50}")
+        logger.info("[ALERT ONLY] %s | %s %s | Edge: %.1f%%",
+                     opp['title'], opp['side'].upper(), opp['ticker'], opp['edge'] * 100)
         alerter.send(
             f"📊 <b>[ALERT ONLY — Economics]</b>\n"
             f"{opp.get('title', opp['ticker'])}\n"
@@ -119,14 +108,10 @@ def process_opportunity(opp: dict, alerter: TelegramAlerter,
         )
         return False
 
-    # Print the opportunity to console
-    print(f"\n   {'─' * 50}")
-    print(f"   📊 {opp['title']}")
-    print(f"   Ticker: {opp['ticker']}")
-    print(f"   Side: {opp['side'].upper()} | Edge: {opp['edge']:.1%}")
-    print(f"   Size: {sizing['recommended_contracts']} contracts (${sizing['recommended_usd']})")
-    print(f"   Rationale: {opp.get('rationale', 'N/A')}")
-    print(f"   {'─' * 50}")
+    # Log the opportunity
+    logger.info("%s | %s %s | Edge: %.1f%% | %d contracts ($%s)",
+                opp['title'], opp['side'].upper(), opp['ticker'],
+                opp['edge'] * 100, sizing['recommended_contracts'], sizing['recommended_usd'])
 
     # Send Telegram alert
     alerter.send_trade_alert(
@@ -140,16 +125,16 @@ def process_opportunity(opp: dict, alerter: TelegramAlerter,
 
     # Wait for approval if required
     if config.REQUIRE_APPROVAL:
-        print("   ⏳ Waiting for Telegram approval...")
+        logger.info("Waiting for Telegram approval...")
         approved = alerter.wait_for_approval(timeout_seconds=300)
 
         if approved is None:
             alerter.send("⏰ Trade alert timed out. Skipping.")
-            print("   ⏰ Timed out — skipping")
+            logger.info("Approval timed out for %s", opp['ticker'])
             return False
         elif not approved:
             alerter.send("❌ Trade rejected.")
-            print("   ❌ Rejected")
+            logger.info("Trade rejected for %s", opp['ticker'])
             return False
 
     # Execute the trade
@@ -162,7 +147,7 @@ def process_opportunity(opp: dict, alerter: TelegramAlerter,
             order_type=config.DEFAULT_ORDER_TYPE,
             price=price_cents,
         )
-        print(f"   ✅ Order placed: {order_result}")
+        logger.info("Order placed: %s", order_result)
 
         # Check fill status
         actual_contracts = sizing["recommended_contracts"]
@@ -179,7 +164,7 @@ def process_opportunity(opp: dict, alerter: TelegramAlerter,
 
                 if status == "canceled" or filled == 0:
                     msg = f"Order {order_id} was not filled (status: {status})"
-                    print(f"   ⚠️  {msg}")
+                    logger.warning(msg)
                     alerter.send(f"⚠️ {msg}")
                     return False
 
@@ -187,10 +172,10 @@ def process_opportunity(opp: dict, alerter: TelegramAlerter,
                     actual_contracts = filled
                     actual_cost = round(actual_cost * (filled / sizing["recommended_contracts"]), 2)
                     msg = f"Partial fill: {filled}/{sizing['recommended_contracts']} contracts"
-                    print(f"   ⚠️  {msg}")
+                    logger.warning(msg)
                     alerter.send(f"⚠️ {msg}")
             except Exception as e:
-                print(f"   ⚠️  Fill check failed (logging requested qty): {e}")
+                logger.warning("Fill check failed (logging requested qty): %s", e)
 
         # Log the trade with actual filled quantities
         tracker.log_trade(
@@ -215,16 +200,23 @@ def process_opportunity(opp: dict, alerter: TelegramAlerter,
         return True
 
     except Exception as e:
-        error_msg = f"❌ Order failed for {opp['ticker']}: {e}"
-        print(f"   {error_msg}")
-        alerter.send(error_msg)
+        logger.error("Order failed for %s: %s", opp['ticker'], e, exc_info=True)
+        alerter.send(f"❌ Order failed for {opp['ticker']}: {e}")
         return False
+
+
+def _make_client():
+    """Create the appropriate client based on PAPER_TRADING config."""
+    if config.PAPER_TRADING:
+        from paper_client import PaperClient
+        return PaperClient()
+    return KalshiClient()
 
 
 def main_loop():
     """Main screening and trading loop."""
     # Initialize components
-    client = KalshiClient()
+    client = _make_client()
     tracker = Tracker()
     alerter = TelegramAlerter()
 
@@ -232,15 +224,10 @@ def main_loop():
     weather_screener = WeatherScreener(client)
     economics_screener = EconomicsScreener(client)
 
-    print("🚀 Kalshi Bot starting...")
-    print(f"   Bankroll: ${config.TOTAL_BANKROLL}")
-    print(f"   Allocation: Crypto {config.ALLOCATION['crypto']:.0%} | "
-          f"Weather {config.ALLOCATION['weather']:.0%} | "
-          f"Economics {config.ALLOCATION['economics']:.0%}")
-    print(f"   Kelly fraction: {config.KELLY_FRACTION:.0%}")
-    print(f"   Min edge threshold: {config.MIN_EDGE_THRESHOLD:.0%}")
-    print(f"   Approval required: {config.REQUIRE_APPROVAL}")
-    print(f"   Screening every {config.SCREENER_INTERVAL_MINUTES} minutes")
+    logger.info("Kalshi Bot starting | Bankroll: $%d | Kelly: %.0f%% | Min edge: %.0f%% | Approval: %s | Interval: %dm",
+                config.TOTAL_BANKROLL, config.KELLY_FRACTION * 100,
+                config.MIN_EDGE_THRESHOLD * 100, config.REQUIRE_APPROVAL,
+                config.SCREENER_INTERVAL_MINUTES)
 
     # Notify on Telegram that the bot is live
     alerter.send("🚀 <b>Kalshi Bot is live.</b>\nScreening crypto, weather, and economics markets.")
@@ -253,9 +240,9 @@ def main_loop():
             )
 
             if not opportunities:
-                print("\n   No opportunities found this cycle.")
+                logger.info("No opportunities found this cycle.")
             else:
-                print(f"\n   🎯 {len(opportunities)} opportunities found. Processing...")
+                logger.info("%d opportunities found. Processing...", len(opportunities))
 
                 # Sort by edge size (highest first)
                 opportunities.sort(key=lambda x: x.get("edge", 0), reverse=True)
@@ -266,19 +253,18 @@ def main_loop():
                     if executed:
                         trades_executed += 1
 
-                print(f"\n   Executed {trades_executed}/{len(opportunities)} trades")
+                logger.info("Executed %d/%d trades", trades_executed, len(opportunities))
 
             # Sleep until next screening cycle
-            print(f"\n   💤 Sleeping {config.SCREENER_INTERVAL_MINUTES} minutes...")
+            logger.info("Sleeping %d minutes...", config.SCREENER_INTERVAL_MINUTES)
             time.sleep(config.SCREENER_INTERVAL_MINUTES * 60)
 
         except KeyboardInterrupt:
-            print("\n\n🛑 Bot stopped by user.")
+            logger.info("Bot stopped by user.")
             alerter.send("🛑 Bot stopped.")
             break
         except Exception as e:
-            print(f"\n❌ Error in main loop: {e}")
-            traceback.print_exc()
+            logger.error("Error in main loop: %s", e, exc_info=True)
             alerter.send(f"⚠️ Bot error: {e}")
             time.sleep(60)  # Brief pause before retrying
 
@@ -295,7 +281,7 @@ def show_summary():
 
 def run_once():
     """Run screeners once and print results (no trading). Good for testing."""
-    client = KalshiClient()
+    client = _make_client()
     crypto = CryptoScreener(client)
     weather = WeatherScreener(client)
     economics = EconomicsScreener(client)
@@ -303,12 +289,10 @@ def run_once():
     opportunities = run_screeners(client, crypto, weather, economics)
 
     if not opportunities:
-        print("\nNo opportunities found.")
+        logger.info("No opportunities found.")
         return
 
-    print(f"\n{'═' * 60}")
-    print(f"  Found {len(opportunities)} opportunities (sorted by edge)")
-    print(f"{'═' * 60}")
+    logger.info("Found %d opportunities (sorted by edge)", len(opportunities))
 
     opportunities.sort(key=lambda x: x.get("edge", 0), reverse=True)
 

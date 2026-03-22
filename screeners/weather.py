@@ -26,6 +26,7 @@ import requests
 from datetime import datetime, timezone, timedelta
 from kalshi_client import KalshiClient
 import config
+from log import logger
 
 
 class WeatherScreener:
@@ -86,7 +87,7 @@ class WeatherScreener:
                 result = self.client.get_markets(series_ticker=series, limit=50)
                 markets = result.get("markets", [])
             except Exception as e:
-                print(f"Error fetching {city} weather markets: {e}")
+                logger.error("Error fetching %s weather markets: %s", city, e)
                 continue
 
             for market in markets:
@@ -135,7 +136,7 @@ class WeatherScreener:
             return periods
 
         except Exception as e:
-            print(f"NWS forecast fetch failed for {city}: {e}")
+            logger.warning("NWS forecast fetch failed for %s: %s", city, e)
             return None
 
     def _get_hourly_forecast(self, city: str) -> list | None:

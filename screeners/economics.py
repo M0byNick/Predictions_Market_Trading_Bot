@@ -24,6 +24,7 @@ import requests
 from datetime import datetime, timezone, timedelta
 from kalshi_client import KalshiClient
 import config
+from log import logger
 
 
 class EconomicsScreener:
@@ -76,7 +77,7 @@ class EconomicsScreener:
                 result = self.client.get_markets(series_ticker=series, limit=50)
                 markets = result.get("markets", [])
             except Exception as e:
-                print(f"Error fetching {event_type} markets: {e}")
+                logger.error("Error fetching %s markets: %s", event_type, e)
                 continue
 
             for market in markets:
@@ -146,7 +147,7 @@ class EconomicsScreener:
             }
 
         except Exception as e:
-            print(f"FRED fetch failed for {event_type}: {e}")
+            logger.warning("FRED fetch failed for %s: %s", event_type, e)
             return None
 
     def _compute_trend(self, values: list) -> str:

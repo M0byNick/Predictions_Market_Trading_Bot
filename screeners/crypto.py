@@ -23,6 +23,7 @@ from datetime import datetime, timezone, timedelta
 import requests
 from kalshi_client import KalshiClient
 import config
+from log import logger
 
 VOL_CACHE_FILE = os.path.join("data", "vol_cache.json")
 VOL_CACHE_MAX_AGE_SECONDS = 4 * 3600  # 4 hours
@@ -66,7 +67,7 @@ class CryptoScreener:
             # Get historical daily volatility (30-day realized vol)
             vol = self._get_realized_vol(ticker)
             if vol is None:
-                print(f"Skipping {ticker}: no vol data available (API down, cache stale)")
+                logger.warning("Skipping %s: no vol data available (API down, cache stale)", ticker)
                 continue
 
             # Fetch open markets in this series
@@ -74,7 +75,7 @@ class CryptoScreener:
                 result = self.client.get_markets(series_ticker=series, limit=100)
                 markets = result.get("markets", [])
             except Exception as e:
-                print(f"Error fetching {series} markets: {e}")
+                logger.error("Error fetching %s markets: %s", series, e)
                 continue
 
             # Filter for weekly and monthly timeframes (skip 15-min day-trading contracts)
@@ -103,7 +104,7 @@ class CryptoScreener:
             data = resp.json()
             return data.get(coin_id, {}).get("usd")
         except Exception as e:
-            print(f"CoinGecko price fetch failed for {ticker}: {e}")
+            logger.warning("CoinGecko price fetch failed for %s: %s", ticker, e)
             return None
 
     def _get_realized_vol(self, ticker: str, days: int = 30) -> float | None:
@@ -137,7 +138,7 @@ class CryptoScreener:
             return annualized_vol
 
         except Exception as e:
-            print(f"CoinGecko vol fetch failed for {ticker}: {e}")
+            logger.warning("CoinGecko vol fetch failed for %s: %s", ticker, e)
             return self._read_vol_cache(ticker)
 
     def _read_vol_cache(self, ticker: str) -> float | None:
@@ -155,10 +156,10 @@ class CryptoScreener:
         cached_time = datetime.fromisoformat(entry["timestamp"])
         age = (datetime.now(timezone.utc) - cached_time).total_seconds()
         if age > VOL_CACHE_MAX_AGE_SECONDS:
-            print(f"Vol cache for {ticker} is stale ({age/3600:.1f}h old), skipping")
+            logger.warning("Vol cache for %s is stale (%.1fh old), skipping", ticker, age/3600)
             return None
 
-        print(f"Using cached vol for {ticker}: {entry['vol']:.4f} ({age/60:.0f}m old)")
+        logger.info("Using cached vol for %s: %.4f (%.0fm old)", ticker, entry['vol'], age/60)
         return entry["vol"]
 
     def _write_vol_cache(self, ticker: str, vol: float) -> None:
