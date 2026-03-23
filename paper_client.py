@@ -67,10 +67,12 @@ class PaperClient(KalshiClient):
             }
 
     def _save_state(self) -> None:
-        """Persist paper trading state to disk."""
+        """Persist paper trading state to disk (atomic write to prevent corruption)."""
         os.makedirs(os.path.dirname(PAPER_TRADES_FILE), exist_ok=True)
-        with open(PAPER_TRADES_FILE, "w") as f:
+        tmp = PAPER_TRADES_FILE + ".tmp"
+        with open(tmp, "w") as f:
             json.dump(self._state, f, indent=2)
+        os.replace(tmp, PAPER_TRADES_FILE)
 
     def place_order(self, ticker: str, side: str, size: int,
                     order_type: str = "limit", price: int = None) -> dict:

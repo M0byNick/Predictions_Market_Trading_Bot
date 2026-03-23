@@ -25,6 +25,7 @@ from datetime import datetime, timezone, timedelta
 from kalshi_client import KalshiClient
 import config
 from log import logger
+from snapshots import log_snapshot
 
 
 class EconomicsScreener:
@@ -52,7 +53,7 @@ class EconomicsScreener:
     def __init__(self, client: KalshiClient):
         self.client = client
 
-    def screen(self) -> list:
+    def screen(self, cycle_id: str = None) -> list:
         """
         Main screening loop:
           1. Fetch recent economic data from FRED to understand current trends
@@ -63,6 +64,7 @@ class EconomicsScreener:
         Returns a list of trade opportunities.
         """
         opportunities = []
+        self._cycle_id = cycle_id
 
         for event_type in config.ECON_EVENTS:
             series = self.SERIES_MAP.get(event_type)
@@ -242,7 +244,20 @@ class EconomicsScreener:
                         flags.append("close_to_threshold_but_extreme_pricing")
                         estimated_edge = 0.10
 
+        snap = {
+            "screener": "economics",
+            "ticker": market.get("ticker", ""),
+            "event_type": event_type,
+            "market_prob": round(market_prob, 4),
+            "flags": flags,
+            "trend": historical.get("trend", "unknown") if historical else "no_data",
+            "latest_value": historical["latest"]["value"] if historical else None,
+            "estimated_edge": round(estimated_edge, 4),
+        }
+
         if not flags:
+            snap.update(decision="skip", reason="no heuristic flags")
+            log_snapshot(snap, cycle_id=getattr(self, "_cycle_id", None))
             return None  # Nothing interesting here
 
         # Determine side based on flags
@@ -257,7 +272,12 @@ class EconomicsScreener:
         edge = your_prob - market_prob if side == "yes" else market_prob - your_prob
 
         if edge < config.MIN_EDGE_THRESHOLD:
+            snap.update(decision="skip", reason="edge below threshold")
+            log_snapshot(snap, cycle_id=getattr(self, "_cycle_id", None))
             return None
+
+        snap.update(decision="trade", side=side, edge=round(edge, 4))
+        log_snapshot(snap, cycle_id=getattr(self, "_cycle_id", None))
 
         return {
             "ticker": market.get("ticker", ""),

@@ -31,12 +31,13 @@ def run_screeners(client: KalshiClient, crypto: CryptoScreener,
     """Run all three screeners and collect opportunities."""
     all_opps = []
 
-    logger.info("Screening at %s", datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC'))
+    cycle_id = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+    logger.info("Screening at %s", cycle_id)
 
     # Crypto screener — 50% allocation, highest expected edge
     logger.info("Scanning crypto markets...")
     try:
-        crypto_opps = crypto.screen()
+        crypto_opps = crypto.screen(cycle_id=cycle_id)
         logger.info("Crypto: %d opportunities", len(crypto_opps))
         all_opps.extend(crypto_opps)
     except Exception:
@@ -45,7 +46,7 @@ def run_screeners(client: KalshiClient, crypto: CryptoScreener,
     # Weather screener — 30% allocation, NWS-based edge
     logger.info("Scanning weather markets...")
     try:
-        weather_opps = weather.screen()
+        weather_opps = weather.screen(cycle_id=cycle_id)
         logger.info("Weather: %d opportunities", len(weather_opps))
         all_opps.extend(weather_opps)
     except Exception:
@@ -54,7 +55,7 @@ def run_screeners(client: KalshiClient, crypto: CryptoScreener,
     # Economics screener — 20% allocation, conservative/manual review
     logger.info("Scanning economics markets...")
     try:
-        econ_opps = economics.screen()
+        econ_opps = economics.screen(cycle_id=cycle_id)
         logger.info("Economics: %d opportunities", len(econ_opps))
         all_opps.extend(econ_opps)
     except Exception:
@@ -140,6 +141,14 @@ def process_opportunity(opp: dict, alerter: TelegramAlerter,
     # Execute the trade
     try:
         price_cents = int(opp["market_prob"] * 100)
+
+        # Mark as pending before placing (crash recovery)
+        tracker.mark_pending(
+            ticker=opp["ticker"], side=opp["side"],
+            contracts=sizing["recommended_contracts"],
+            cost_usd=sizing["recommended_usd"],
+        )
+
         order_result = client.place_order(
             ticker=opp["ticker"],
             side=opp["side"],
@@ -149,10 +158,20 @@ def process_opportunity(opp: dict, alerter: TelegramAlerter,
         )
         logger.info("Order placed: %s", order_result)
 
+        # Update pending record with actual order_id
+        order_id = order_result.get("order", {}).get("order_id")
+        if order_id:
+            tracker.clear_pending(opp["ticker"], opp["side"])
+            tracker.mark_pending(
+                ticker=opp["ticker"], side=opp["side"],
+                contracts=sizing["recommended_contracts"],
+                cost_usd=sizing["recommended_usd"],
+                order_id=order_id,
+            )
+
         # Check fill status
         actual_contracts = sizing["recommended_contracts"]
         actual_cost = sizing["recommended_usd"]
-        order_id = order_result.get("order", {}).get("order_id")
 
         if order_id:
             try:
@@ -190,6 +209,9 @@ def process_opportunity(opp: dict, alerter: TelegramAlerter,
             notes=opp.get("rationale", ""),
         )
 
+        # Trade is tracked — remove from pending orders
+        tracker.clear_pending(opp["ticker"], opp["side"])
+
         # Confirm via Telegram
         alerter.send_execution_confirmation(
             ticker=opp["ticker"],
@@ -202,7 +224,55 @@ def process_opportunity(opp: dict, alerter: TelegramAlerter,
     except Exception as e:
         logger.error("Order failed for %s: %s", opp['ticker'], e, exc_info=True)
         alerter.send(f"❌ Order failed for {opp['ticker']}: {e}")
+        tracker.clear_pending(opp["ticker"], opp["side"])
         return False
+
+
+def reconcile_pending_orders(tracker: Tracker, client: KalshiClient,
+                             alerter: TelegramAlerter) -> None:
+    """Check for orphaned orders from a previous crash and reconcile them."""
+    pending = tracker.get_pending_orders()
+    if not pending:
+        return
+
+    logger.warning("Found %d pending orders from previous run — reconciling...", len(pending))
+    alerter.send(f"⚠️ Reconciling {len(pending)} pending order(s) from previous run...")
+
+    for p in pending:
+        order_id = p.get("order_id")
+        ticker = p["ticker"]
+        side = p["side"]
+
+        if order_id:
+            try:
+                order_status = client.get_order(order_id)
+                order_data = order_status.get("order", order_status)
+                status = order_data.get("status", "unknown")
+                remaining = order_data.get("remaining_count", 0)
+                filled = p["contracts"] - remaining
+
+                if status == "filled" or filled > 0:
+                    actual_cost = round(p["cost_usd"] * (filled / p["contracts"]), 2) if p["contracts"] else 0
+                    tracker.log_trade(
+                        ticker=ticker, category="unknown", side=side,
+                        your_prob=0, market_prob=0,
+                        num_contracts=filled, cost_usd=actual_cost,
+                        kelly_fraction=0, notes=f"Recovered from crash (order {order_id})",
+                    )
+                    msg = f"Recovered order {order_id}: {filled} contracts filled on {ticker}"
+                    logger.info(msg)
+                    alerter.send(f"🔄 {msg}")
+                else:
+                    msg = f"Pending order {order_id} on {ticker}: status={status}, no fills"
+                    logger.warning(msg)
+                    alerter.send(f"⚠️ {msg}")
+            except Exception as e:
+                logger.error("Failed to reconcile order %s: %s", order_id, e)
+                alerter.send(f"❌ Could not reconcile order {order_id} on {ticker}: {e}")
+        else:
+            logger.warning("Pending order for %s has no order_id — may have crashed before placement", ticker)
+
+        tracker.clear_pending(ticker, side)
 
 
 def _make_client():
@@ -229,11 +299,22 @@ def main_loop():
                 config.MIN_EDGE_THRESHOLD * 100, config.REQUIRE_APPROVAL,
                 config.SCREENER_INTERVAL_MINUTES)
 
+    # Reconcile any orphaned orders from a previous crash
+    reconcile_pending_orders(tracker, client, alerter)
+
     # Notify on Telegram that the bot is live
     alerter.send("🚀 <b>Kalshi Bot is live.</b>\nScreening crypto, weather, and economics markets.")
 
+    # Health check state
+    start_time = datetime.now(timezone.utc)
+    cycle_count = 0
+    last_opp_time = "never"
+    no_opp_alert_sent = False
+
     while True:
         try:
+            cycle_count += 1
+
             # Run all screeners
             opportunities = run_screeners(
                 client, crypto_screener, weather_screener, economics_screener
@@ -242,6 +323,8 @@ def main_loop():
             if not opportunities:
                 logger.info("No opportunities found this cycle.")
             else:
+                last_opp_time = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')
+                no_opp_alert_sent = False
                 logger.info("%d opportunities found. Processing...", len(opportunities))
 
                 # Sort by edge size (highest first)
@@ -254,6 +337,22 @@ def main_loop():
                         trades_executed += 1
 
                 logger.info("Executed %d/%d trades", trades_executed, len(opportunities))
+
+            # Health check heartbeat
+            if cycle_count % config.HEALTH_CHECK_INTERVAL_CYCLES == 0:
+                uptime_h = (datetime.now(timezone.utc) - start_time).total_seconds() / 3600
+                try:
+                    balance = client.get_balance().get("balance", 0) / 100
+                except Exception:
+                    balance = 0.0
+                alerter.send_health_check(cycle_count, uptime_h, last_opp_time, balance)
+
+            # No-opportunity watchdog (alert once, not every cycle)
+            if last_opp_time == "never" or not no_opp_alert_sent:
+                elapsed_h = (datetime.now(timezone.utc) - start_time).total_seconds() / 3600
+                if elapsed_h >= config.NO_OPP_ALERT_HOURS and last_opp_time == "never":
+                    alerter.send_no_opportunity_alert(elapsed_h)
+                    no_opp_alert_sent = True
 
             # Sleep until next screening cycle
             logger.info("Sleeping %d minutes...", config.SCREENER_INTERVAL_MINUTES)

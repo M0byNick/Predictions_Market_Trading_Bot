@@ -94,6 +94,24 @@ class TelegramAlerter:
         """Send the daily performance summary."""
         self.send(f"📋 <b>Daily Summary</b>\n\n<pre>{summary}</pre>")
 
+    def send_health_check(self, cycle_count: int, uptime_hours: float,
+                          last_opp_time: str, balance_usd: float) -> bool:
+        """Send a periodic health check heartbeat."""
+        return self.send(
+            f"💓 <b>Health Check</b>\n"
+            f"Cycles: {cycle_count}\n"
+            f"Uptime: {uptime_hours:.1f}h\n"
+            f"Last opportunity: {last_opp_time}\n"
+            f"Balance: ${balance_usd:.2f}"
+        )
+
+    def send_no_opportunity_alert(self, hours: float) -> bool:
+        """Alert when no opportunities have been found for too long."""
+        return self.send(
+            f"⚠️ <b>No opportunities found in {hours:.0f}h.</b>\n"
+            f"Markets may be efficiently priced, or screeners may need attention."
+        )
+
     def wait_for_approval(self, timeout_seconds: int = 300) -> bool | None:
         """
         Poll for a YES/NO reply. Returns True if approved, False if rejected,

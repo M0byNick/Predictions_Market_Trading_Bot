@@ -24,6 +24,7 @@ import requests
 from kalshi_client import KalshiClient
 import config
 from log import logger
+from snapshots import log_snapshot
 
 VOL_CACHE_FILE = os.path.join("data", "vol_cache.json")
 VOL_CACHE_MAX_AGE_SECONDS = 4 * 3600  # 4 hours
@@ -42,7 +43,7 @@ class CryptoScreener:
     def __init__(self, client: KalshiClient):
         self.client = client
 
-    def screen(self) -> list:
+    def screen(self, cycle_id: str = None) -> list:
         """
         Main screening loop. For each configured crypto ticker:
           1. Fetch current spot price (via CoinGecko, free, no key)
@@ -53,6 +54,7 @@ class CryptoScreener:
         Returns a list of trade opportunities with sizing info.
         """
         opportunities = []
+        self._cycle_id = cycle_id
 
         for ticker in config.CRYPTO_TICKERS:
             series = self.SERIES_MAP.get(ticker)
@@ -240,6 +242,21 @@ class CryptoScreener:
         edge_yes = model_prob - market_prob
         edge_no = (1 - model_prob) - (1 - market_prob)  # Equivalent to market_prob - model_prob
 
+        # Snapshot base data (logged for both trade and skip)
+        snap = {
+            "screener": "crypto",
+            "ticker": market.get("ticker", ""),
+            "asset": ticker,
+            "spot": spot,
+            "strike": strike,
+            "vol": round(vol, 4),
+            "days_to_expiry": round(T * 365.25, 1),
+            "model_prob": round(model_prob, 4),
+            "market_prob": round(market_prob, 4),
+            "edge_yes": round(edge_yes, 4),
+            "edge_no": round(edge_no, 4),
+        }
+
         # Pick the side with positive edge above threshold
         if edge_yes >= config.MIN_EDGE_THRESHOLD:
             side = "yes"
@@ -250,7 +267,12 @@ class CryptoScreener:
             edge = edge_no
             your_prob = 1 - model_prob
         else:
+            snap.update(decision="skip", reason="edge below threshold")
+            log_snapshot(snap, cycle_id=getattr(self, "_cycle_id", None))
             return None  # No tradeable edge
+
+        snap.update(decision="trade", side=side, edge=round(edge, 4))
+        log_snapshot(snap, cycle_id=getattr(self, "_cycle_id", None))
 
         return {
             "ticker": market.get("ticker", ""),

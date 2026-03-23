@@ -27,6 +27,7 @@ from datetime import datetime, timezone, timedelta
 from kalshi_client import KalshiClient
 import config
 from log import logger
+from snapshots import log_snapshot
 
 
 class WeatherScreener:
@@ -56,7 +57,7 @@ class WeatherScreener:
     def __init__(self, client: KalshiClient):
         self.client = client
 
-    def screen(self) -> list:
+    def screen(self, cycle_id: str = None) -> list:
         """
         Main screening loop:
           1. For each target city, fetch NWS forecast
@@ -67,6 +68,7 @@ class WeatherScreener:
         Returns a list of trade opportunities.
         """
         opportunities = []
+        self._cycle_id = cycle_id
 
         for city in config.WEATHER_CITIES:
             if city not in self.CITY_COORDS:
@@ -227,6 +229,20 @@ class WeatherScreener:
         edge_yes = model_prob - market_prob
         edge_no = market_prob - model_prob
 
+        snap = {
+            "screener": "weather",
+            "ticker": market.get("ticker", ""),
+            "city": city,
+            "forecast_high": nws_forecast_high,
+            "threshold": threshold,
+            "days_out": days_out,
+            "forecast_std": std,
+            "model_prob": round(model_prob, 4),
+            "market_prob": round(market_prob, 4),
+            "edge_yes": round(edge_yes, 4),
+            "edge_no": round(edge_no, 4),
+        }
+
         if edge_yes >= config.MIN_EDGE_THRESHOLD:
             side = "yes"
             edge = edge_yes
@@ -236,7 +252,12 @@ class WeatherScreener:
             edge = edge_no
             your_prob = 1 - model_prob
         else:
+            snap.update(decision="skip", reason="edge below threshold")
+            log_snapshot(snap, cycle_id=getattr(self, "_cycle_id", None))
             return None
+
+        snap.update(decision="trade", side=side, edge=round(edge, 4))
+        log_snapshot(snap, cycle_id=getattr(self, "_cycle_id", None))
 
         return {
             "ticker": market.get("ticker", ""),

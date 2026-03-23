@@ -92,6 +92,12 @@ REQUIRE_APPROVAL = True
 # Limit orders are strongly recommended — they define your entry price.
 DEFAULT_ORDER_TYPE = "limit"
 
+# ── Health Checks ───────────────────────────────────────────────────────────
+# Send a heartbeat every N screening cycles (e.g., 6 × 30min = 3h)
+HEALTH_CHECK_INTERVAL_CYCLES = 6
+# Alert if no opportunities found for this many hours
+NO_OPP_ALERT_HOURS = 24
+
 # ── Data Storage ─────────────────────────────────────────────────────────────
 TRADES_FILE = "data/trades.json"
 PERFORMANCE_FILE = "data/performance.csv"

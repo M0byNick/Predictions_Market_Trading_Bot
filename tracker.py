@@ -17,14 +17,20 @@ import csv
 from datetime import datetime, timezone
 from typing import Optional
 import config
+from log import logger
+
+
+PENDING_ORDERS_FILE = "data/pending_orders.json"
 
 
 class Tracker:
     """Manages the trade log and computes performance metrics."""
 
-    def __init__(self, trades_file: str = None, performance_file: str = None):
+    def __init__(self, trades_file: str = None, performance_file: str = None,
+                 pending_file: str = None):
         self.trades_file = trades_file or config.TRADES_FILE
         self.performance_file = performance_file or config.PERFORMANCE_FILE
+        self.pending_file = pending_file or PENDING_ORDERS_FILE
         self.trades = self._load_trades()
 
     def _load_trades(self) -> list:
@@ -35,10 +41,57 @@ class Tracker:
         return []
 
     def _save_trades(self):
-        """Persist the trade log to disk."""
+        """Persist the trade log to disk (atomic write to prevent corruption)."""
         os.makedirs(os.path.dirname(self.trades_file), exist_ok=True)
-        with open(self.trades_file, "w") as f:
+        tmp = self.trades_file + ".tmp"
+        with open(tmp, "w") as f:
             json.dump(self.trades, f, indent=2, default=str)
+        os.replace(tmp, self.trades_file)
+
+    # ── Pending Orders (crash recovery) ─────────────────────────────────
+
+    def _load_pending(self) -> list:
+        """Load pending orders from disk."""
+        try:
+            with open(self.pending_file, "r") as f:
+                return json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            return []
+
+    def _save_pending(self, pending: list) -> None:
+        """Persist pending orders to disk (atomic)."""
+        os.makedirs(os.path.dirname(self.pending_file), exist_ok=True)
+        tmp = self.pending_file + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(pending, f, indent=2, default=str)
+        os.replace(tmp, self.pending_file)
+
+    def mark_pending(self, ticker: str, side: str, contracts: int,
+                     cost_usd: float, order_id: str = None) -> None:
+        """Record an order as pending before execution."""
+        pending = self._load_pending()
+        pending.append({
+            "ticker": ticker,
+            "side": side,
+            "contracts": contracts,
+            "cost_usd": cost_usd,
+            "order_id": order_id,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        })
+        self._save_pending(pending)
+
+    def clear_pending(self, ticker: str, side: str) -> None:
+        """Remove a pending order after it has been tracked."""
+        pending = self._load_pending()
+        pending = [p for p in pending
+                   if not (p["ticker"] == ticker and p["side"] == side)]
+        self._save_pending(pending)
+
+    def get_pending_orders(self) -> list:
+        """Return all pending orders for reconciliation."""
+        return self._load_pending()
+
+    # ── Trade Logging ─────────────────────────────────────────────────────
 
     def log_trade(self, ticker: str, category: str, side: str,
                   your_prob: float, market_prob: float,
