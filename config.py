@@ -20,6 +20,7 @@ if _env_file.exists():
 # ── Kalshi API ───────────────────────────────────────────────────────────────
 KALSHI_API_BASE = "https://api.elections.kalshi.com/trade-api/v2"
 KALSHI_EMAIL = os.environ.get("KALSHI_EMAIL", "")
+KALSHI_API_ID = os.environ.get("KALSHI_API_ID", "")
 KALSHI_PRIVATE_KEY_PATH = os.environ.get("KALSHI_PRIVATE_KEY_PATH", "kalshi_private_key.pem")
 
 # ── Telegram Alerts ──────────────────────────────────────────────────────────
@@ -27,11 +28,11 @@ TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 
 # ── Bankroll & Allocation ────────────────────────────────────────────────────
-TOTAL_BANKROLL = 5000       # Starting bankroll in USD
+TOTAL_BANKROLL = 7500       # Starting bankroll in USD ($2500 per strategy)
 ALLOCATION = {
-    "crypto":    0.50,      # 50% to crypto event contracts
-    "weather":   0.30,      # 30% to weather/climate contracts
-    "economics": 0.20,      # 20% to economic data releases
+    "crypto":    0.3333,    # $2500 to crypto event contracts
+    "weather":   0.3333,    # $2500 to weather/climate contracts
+    "economics": 0.3334,    # $2500 to economic data releases
 }
 
 # ── Kelly Criterion Parameters ───────────────────────────────────────────────
@@ -74,7 +75,7 @@ FRED_API_KEY = os.environ.get("FRED_API_KEY", "")
 # ── Economics Screener Overrides ─────────────────────────────────────────
 # Economics edge estimates are heuristic, not model-driven.
 # Default to alert-only: send Telegram notifications but do not execute.
-ECON_ALERT_ONLY = True
+ECON_ALERT_ONLY = False
 # If overridden to auto-trade, use a much smaller Kelly fraction.
 ECON_MAX_KELLY_FRACTION = 0.10  # vs 0.25 for crypto/weather
 
@@ -86,7 +87,7 @@ PAPER_TRADING = True  # Set to False for live trading
 # ── Trade Execution ──────────────────────────────────────────────────────────
 # If True, the bot will send Telegram alerts and wait for your approval
 # before placing orders. If False, it auto-executes (use with caution).
-REQUIRE_APPROVAL = True
+REQUIRE_APPROVAL = False
 
 # Order type: "limit" places at your target price, "market" fills immediately.
 # Limit orders are strongly recommended — they define your entry price.
@@ -99,5 +100,11 @@ HEALTH_CHECK_INTERVAL_CYCLES = 6
 NO_OPP_ALERT_HOURS = 24
 
 # ── Data Storage ─────────────────────────────────────────────────────────────
-TRADES_FILE = "data/trades.json"
+DB_PATH = "data/kalshi.db"
+TRADES_FILE = "data/trades.json"            # Legacy (auto-migrated to SQLite)
 PERFORMANCE_FILE = "data/performance.csv"
+
+# ── Signal-Only Mode ────────────────────────────────────────────────────────
+# If True, screeners run and Telegram alerts fire, but no orders are placed.
+# You review opportunities on mobile and manually approve each one.
+SIGNAL_ONLY = False

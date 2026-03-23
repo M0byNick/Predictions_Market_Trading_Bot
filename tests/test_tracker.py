@@ -1,9 +1,7 @@
-"""Unit tests for the trade tracker."""
+"""Unit tests for the trade tracker (SQLite backend)."""
 from __future__ import annotations
 import sys
 import os
-import json
-import tempfile
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -19,13 +17,11 @@ def _patch_config(monkeypatch):
 
 @pytest.fixture
 def tracker(tmp_path):
-    """Create a Tracker with temp files."""
+    """Create a Tracker backed by a temp SQLite database."""
     from tracker import Tracker
-    trades_file = str(tmp_path / "trades.json")
+    db_path = str(tmp_path / "test.db")
     perf_file = str(tmp_path / "performance.csv")
-    pending_file = str(tmp_path / "pending.json")
-    return Tracker(trades_file=trades_file, performance_file=perf_file,
-                   pending_file=pending_file)
+    return Tracker(db_path=db_path, performance_file=perf_file)
 
 
 class TestLogTrade:
@@ -44,11 +40,10 @@ class TestLogTrade:
 
     def test_persistence(self, tracker):
         tracker.log_trade("T1", "crypto", "yes", 0.7, 0.5, 5, 25.0, 0.1)
-        # Reload from disk
+        # Reload from database
         from tracker import Tracker
-        t2 = Tracker(trades_file=tracker.trades_file,
-                     performance_file=tracker.performance_file,
-                     pending_file=tracker.pending_file)
+        t2 = Tracker(db_path=tracker.db_path,
+                     performance_file=tracker.performance_file)
         assert len(t2.trades) == 1
         assert t2.trades[0]["ticker"] == "T1"
 
@@ -76,7 +71,7 @@ class TestRecordOutcome:
         tracker.record_outcome(1, "win", 1.0)
         t = tracker.trades[0]
         assert t["outcome"] == "win"
-        # Bought YES at 0.55, won → profit = (1.0 - 0.55) * 10 = $4.50
+        # Bought YES at 0.55, won -> profit = (1.0 - 0.55) * 10 = $4.50
         assert t["pnl_usd"] == 4.50
 
     def test_loss(self, tracker):
@@ -84,14 +79,14 @@ class TestRecordOutcome:
         tracker.record_outcome(1, "loss", 0.0)
         t = tracker.trades[0]
         assert t["outcome"] == "loss"
-        # Bought YES at 0.55, lost → loss = -0.55 * 10 = -$5.50
+        # Bought YES at 0.55, lost -> loss = -0.55 * 10 = -$5.50
         assert t["pnl_usd"] == -5.50
 
     def test_no_side_win(self, tracker):
         tracker.log_trade("T1", "crypto", "no", 0.30, 0.55, 10, 45.0, 0.1)
         tracker.record_outcome(1, "win", 0.0)
         t = tracker.trades[0]
-        # Bought NO at cost_per = 1 - 0.55 = 0.45, won → (1.0 - 0.45) * 10 = $5.50
+        # Bought NO at cost_per = 1 - 0.55 = 0.45, won -> (1.0 - 0.45) * 10 = $5.50
         assert t["pnl_usd"] == 5.50
 
 
@@ -110,13 +105,13 @@ class TestMetrics:
     def test_brier_score_perfect(self, tracker):
         tracker.log_trade("T1", "crypto", "yes", 1.0, 0.5, 5, 25.0, 0.1)
         tracker.record_outcome(1, "win", 1.0)
-        # Predicted 1.0, actual 1.0 → (1.0 - 1.0)^2 = 0.0
+        # Predicted 1.0, actual 1.0 -> (1.0 - 1.0)^2 = 0.0
         assert tracker.brier_score() == 0.0
 
     def test_brier_score_worst(self, tracker):
         tracker.log_trade("T1", "crypto", "yes", 1.0, 0.5, 5, 25.0, 0.1)
         tracker.record_outcome(1, "loss", 0.0)
-        # Predicted 1.0, actual 0.0 → (1.0 - 0.0)^2 = 1.0
+        # Predicted 1.0, actual 0.0 -> (1.0 - 0.0)^2 = 1.0
         assert tracker.brier_score() == 1.0
 
     def test_brier_score_none_when_empty(self, tracker):
@@ -170,7 +165,52 @@ class TestPendingOrders:
     def test_persistence(self, tracker):
         tracker.mark_pending("T1", "yes", 10, 55.0, "order-123")
         from tracker import Tracker
-        t2 = Tracker(trades_file=tracker.trades_file,
-                     performance_file=tracker.performance_file,
-                     pending_file=tracker.pending_file)
+        t2 = Tracker(db_path=tracker.db_path,
+                     performance_file=tracker.performance_file)
         assert len(t2.get_pending_orders()) == 1
+
+
+class TestDailyPnl:
+
+    def test_daily_pnl_aggregation(self, tracker):
+        tracker.log_trade("T1", "crypto", "yes", 0.7, 0.5, 10, 50.0, 0.1)
+        tracker.log_trade("T2", "crypto", "yes", 0.7, 0.5, 10, 50.0, 0.1)
+        tracker.record_outcome(1, "win", 1.0)
+        tracker.record_outcome(2, "loss", 0.0)
+        daily = tracker.get_daily_pnl(days=1)
+        assert len(daily) >= 1
+        crypto_day = [d for d in daily if d["category"] == "crypto"]
+        assert len(crypto_day) == 1
+        assert crypto_day[0]["trade_count"] == 2
+        assert crypto_day[0]["win_count"] == 1
+        assert crypto_day[0]["loss_count"] == 1
+
+
+class TestJsonMigration:
+
+    def test_migrate_trades(self, tmp_path):
+        """Verify that legacy JSON trades are imported on first init."""
+        import json
+        from tracker import Tracker
+
+        # Create legacy JSON trades file
+        trades_file = str(tmp_path / "trades.json")
+        legacy_trades = [
+            {
+                "id": 1, "ticker": "T1", "category": "crypto", "side": "yes",
+                "your_prob": 0.7, "market_prob": 0.5, "edge_at_entry": 0.2,
+                "num_contracts": 5, "cost_usd": 25.0, "kelly_fraction": 0.1,
+                "entry_time": "2026-03-01T00:00:00+00:00",
+                "outcome": "win", "settlement_price": 1.0, "pnl_usd": 2.5,
+                "settlement_time": "2026-03-02T00:00:00+00:00", "notes": "",
+            }
+        ]
+        with open(trades_file, "w") as f:
+            json.dump(legacy_trades, f)
+
+        db_path = str(tmp_path / "test.db")
+        tracker = Tracker(db_path=db_path, trades_file=trades_file,
+                          performance_file=str(tmp_path / "perf.csv"))
+        assert len(tracker.trades) == 1
+        assert tracker.trades[0]["ticker"] == "T1"
+        assert tracker.trades[0]["outcome"] == "win"

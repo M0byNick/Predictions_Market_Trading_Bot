@@ -10,6 +10,8 @@ Usage:
     python main.py --backtest   # Review your historical performance
     python main.py --summary    # Print current performance summary
     python main.py --once       # Run screeners once and exit (good for testing)
+    python main.py --calibration  # Print calibration report
+    python main.py --dry-run    # Run one full cycle and exit (CI-friendly)
 """
 import sys
 import time
@@ -93,6 +95,19 @@ def process_opportunity(opp: dict, alerter: TelegramAlerter,
     # If Kelly says no trade, skip silently
     if sizing["action"] in ("no_trade", "skip"):
         logger.debug("Skip %s: %s", opp['ticker'], sizing['reason'])
+        return False
+
+    # Signal-only mode: alert but do not execute anything
+    if config.SIGNAL_ONLY:
+        logger.info("[SIGNAL ONLY] %s | %s %s | Edge: %.1f%%",
+                     opp['title'], opp['side'].upper(), opp['ticker'], opp['edge'] * 100)
+        alerter.send(
+            f"📡 <b>[SIGNAL ONLY]</b>\n"
+            f"{opp.get('title', opp['ticker'])}\n"
+            f"Side: {opp['side'].upper()} | Edge: {opp['edge']:.1%}\n"
+            f"Suggested: {sizing['recommended_contracts']} contracts (${sizing['recommended_usd']})\n"
+            f"{opp.get('rationale', '')}"
+        )
         return False
 
     # Economics alert-only mode: notify but do not execute
@@ -406,10 +421,61 @@ def run_once():
         print(f"   Rationale: {opp.get('rationale', 'N/A')}")
 
 
+def show_calibration():
+    """Print calibration analysis report."""
+    from calibration import CalibrationAnalyzer
+    analyzer = CalibrationAnalyzer()
+
+    category = None
+    if "--category" in sys.argv:
+        idx = sys.argv.index("--category")
+        if idx + 1 < len(sys.argv):
+            category = sys.argv[idx + 1]
+
+    print(analyzer.full_report(category))
+
+    if "--export" in sys.argv:
+        path = analyzer.export_csv(category=category)
+        print(f"Calibration data exported to {path}")
+
+
+def dry_run():
+    """Run one full cycle (screen + size + paper-execute) and exit. CI-friendly."""
+    client = _make_client()
+    tracker = Tracker()
+    alerter = TelegramAlerter()
+
+    crypto = CryptoScreener(client)
+    weather = WeatherScreener(client)
+    economics = EconomicsScreener(client)
+
+    opportunities = run_screeners(client, crypto, weather, economics)
+
+    if not opportunities:
+        logger.info("Dry run: no opportunities found.")
+        return
+
+    opportunities.sort(key=lambda x: x.get("edge", 0), reverse=True)
+    trades_executed = 0
+    for opp in opportunities:
+        executed = process_opportunity(opp, alerter, tracker, client)
+        if executed:
+            trades_executed += 1
+
+    logger.info("Dry run complete: %d/%d trades executed", trades_executed, len(opportunities))
+
+    # Print summary
+    print(tracker.summary())
+
+
 if __name__ == "__main__":
     if "--summary" in sys.argv or "--backtest" in sys.argv:
         show_summary()
+    elif "--calibration" in sys.argv:
+        show_calibration()
     elif "--once" in sys.argv:
         run_once()
+    elif "--dry-run" in sys.argv:
+        dry_run()
     else:
         main_loop()

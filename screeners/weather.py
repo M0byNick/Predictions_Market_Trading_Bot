@@ -27,6 +27,7 @@ from datetime import datetime, timezone, timedelta
 from kalshi_client import KalshiClient
 import config
 from log import logger
+from screeners.utils import get_market_prob
 from snapshots import log_snapshot
 
 
@@ -46,12 +47,12 @@ class WeatherScreener:
                 "nws_office": "EWX", "gridX": 54, "gridY": 98},
     }
 
-    # Kalshi weather series tickers (these may need updating as Kalshi adds markets)
+    # Kalshi weather series tickers
     SERIES_MAP = {
-        "NYC": "HIGHNY",
-        "CHI": "HIGHCHI",
-        "MIA": "HIGHMIA",
-        "AUS": "HIGHAUS",
+        "NYC": "KXHIGHNY",
+        "CHI": "KXHIGHCHI",
+        "MIA": "KXHIGHMIA",
+        "AUS": "KXHIGHAUS",
     }
 
     def __init__(self, client: KalshiClient):
@@ -221,7 +222,7 @@ class WeatherScreener:
         model_prob = 1 - norm.cdf(z_score)
 
         # Get market price
-        market_prob = (market.get("last_price") or market.get("yes_ask") or 50) / 100.0
+        market_prob = get_market_prob(market)
         if market_prob <= 0 or market_prob >= 1:
             return None
 

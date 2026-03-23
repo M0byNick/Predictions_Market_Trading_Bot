@@ -25,19 +25,18 @@ from datetime import datetime, timezone, timedelta
 from kalshi_client import KalshiClient
 import config
 from log import logger
+from screeners.utils import get_market_prob
 from snapshots import log_snapshot
 
 
 class EconomicsScreener:
     """Screens economic data release contracts on Kalshi."""
 
-    # Kalshi series tickers for economic events (may need updating)
+    # Kalshi series tickers for economic events
     SERIES_MAP = {
         "CPI": "KXCPI",
-        "FED_RATE": "FED",
-        "NONFARM": "KXNFP",
-        "GDP": "KXGDP",
-        "UNEMPLOYMENT": "KXUNEMP",
+        "CPI_YOY": "KXCPIYOY",
+        "FED_RATE": "KXFED",
     }
 
     # FRED series IDs for each economic indicator
@@ -197,7 +196,7 @@ class EconomicsScreener:
         import re
 
         # Get market price
-        market_prob = (market.get("last_price") or market.get("yes_ask") or 50) / 100.0
+        market_prob = get_market_prob(market)
         if market_prob <= 0 or market_prob >= 1:
             return None
 

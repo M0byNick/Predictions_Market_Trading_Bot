@@ -10,86 +10,61 @@ Key metrics:
   - Hit rate: percentage of trades where you were on the correct side
   - Edge realized: average (your_prob - market_prob) on winning trades
   - Bankroll curve: cumulative P&L over time
+
+Storage: SQLite database (migrated from JSON in Tier 2).
 """
-import json
-import os
+from __future__ import annotations
+
 import csv
+import os
 from datetime import datetime, timezone
 from typing import Optional
+
 import config
+from db import init_db, migrate_json_trades, migrate_json_pending, transaction
 from log import logger
-
-
-PENDING_ORDERS_FILE = "data/pending_orders.json"
 
 
 class Tracker:
     """Manages the trade log and computes performance metrics."""
 
-    def __init__(self, trades_file: str = None, performance_file: str = None,
-                 pending_file: str = None):
-        self.trades_file = trades_file or config.TRADES_FILE
+    def __init__(self, db_path: str = None, performance_file: str = None,
+                 trades_file: str = None, pending_file: str = None):
+        self.db_path = db_path or config.DB_PATH
         self.performance_file = performance_file or config.PERFORMANCE_FILE
-        self.pending_file = pending_file or PENDING_ORDERS_FILE
-        self.trades = self._load_trades()
+        self._legacy_trades_file = trades_file or config.TRADES_FILE
+        self._legacy_pending_file = pending_file or "data/pending_orders.json"
+        self.conn = init_db(self.db_path)
 
-    def _load_trades(self) -> list:
-        """Load existing trades from the JSON file, or start fresh."""
-        if os.path.exists(self.trades_file):
-            with open(self.trades_file, "r") as f:
-                return json.load(f)
-        return []
-
-    def _save_trades(self):
-        """Persist the trade log to disk (atomic write to prevent corruption)."""
-        os.makedirs(os.path.dirname(self.trades_file), exist_ok=True)
-        tmp = self.trades_file + ".tmp"
-        with open(tmp, "w") as f:
-            json.dump(self.trades, f, indent=2, default=str)
-        os.replace(tmp, self.trades_file)
+        # Auto-migrate legacy JSON data on first run
+        migrate_json_trades(self.conn, self._legacy_trades_file)
+        migrate_json_pending(self.conn, self._legacy_pending_file)
 
     # ── Pending Orders (crash recovery) ─────────────────────────────────
-
-    def _load_pending(self) -> list:
-        """Load pending orders from disk."""
-        try:
-            with open(self.pending_file, "r") as f:
-                return json.load(f)
-        except (FileNotFoundError, json.JSONDecodeError):
-            return []
-
-    def _save_pending(self, pending: list) -> None:
-        """Persist pending orders to disk (atomic)."""
-        os.makedirs(os.path.dirname(self.pending_file), exist_ok=True)
-        tmp = self.pending_file + ".tmp"
-        with open(tmp, "w") as f:
-            json.dump(pending, f, indent=2, default=str)
-        os.replace(tmp, self.pending_file)
 
     def mark_pending(self, ticker: str, side: str, contracts: int,
                      cost_usd: float, order_id: str = None) -> None:
         """Record an order as pending before execution."""
-        pending = self._load_pending()
-        pending.append({
-            "ticker": ticker,
-            "side": side,
-            "contracts": contracts,
-            "cost_usd": cost_usd,
-            "order_id": order_id,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-        })
-        self._save_pending(pending)
+        self.conn.execute("""
+            INSERT INTO pending_orders (ticker, side, contracts, cost_usd,
+                order_id, timestamp)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (ticker, side, contracts, cost_usd, order_id,
+              datetime.now(timezone.utc).isoformat()))
+        self.conn.commit()
 
     def clear_pending(self, ticker: str, side: str) -> None:
         """Remove a pending order after it has been tracked."""
-        pending = self._load_pending()
-        pending = [p for p in pending
-                   if not (p["ticker"] == ticker and p["side"] == side)]
-        self._save_pending(pending)
+        self.conn.execute(
+            "DELETE FROM pending_orders WHERE ticker = ? AND side = ?",
+            (ticker, side),
+        )
+        self.conn.commit()
 
     def get_pending_orders(self) -> list:
         """Return all pending orders for reconciliation."""
-        return self._load_pending()
+        rows = self.conn.execute("SELECT * FROM pending_orders").fetchall()
+        return [dict(r) for r in rows]
 
     # ── Trade Logging ─────────────────────────────────────────────────────
 
@@ -101,65 +76,114 @@ class Tracker:
         Log a new trade at entry time. The outcome will be recorded
         later when the contract settles.
         """
-        trade = {
-            "id": len(self.trades) + 1,
+        edge = round(your_prob - market_prob, 4) if side == "yes" \
+            else round((1 - your_prob) - (1 - market_prob), 4)
+        entry_time = datetime.now(timezone.utc).isoformat()
+
+        cursor = self.conn.execute("""
+            INSERT INTO trades (ticker, category, side, your_prob, market_prob,
+                edge_at_entry, num_contracts, cost_usd, kelly_fraction,
+                entry_time, notes)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (ticker, category, side, your_prob, market_prob, edge,
+              num_contracts, cost_usd, kelly_fraction, entry_time, notes))
+        self.conn.commit()
+
+        trade_id = cursor.lastrowid
+
+        return {
+            "id": trade_id,
             "ticker": ticker,
             "category": category,
             "side": side,
             "your_prob": your_prob,
             "market_prob": market_prob,
-            "edge_at_entry": round(your_prob - market_prob, 4) if side == "yes"
-                             else round((1 - your_prob) - (1 - market_prob), 4),
+            "edge_at_entry": edge,
             "num_contracts": num_contracts,
             "cost_usd": cost_usd,
             "kelly_fraction": kelly_fraction,
-            "entry_time": datetime.now(timezone.utc).isoformat(),
-            "outcome": None,        # "win" or "loss" — filled at settlement
-            "settlement_price": None,  # 1.0 or 0.0 for binary contracts
+            "entry_time": entry_time,
+            "outcome": None,
+            "settlement_price": None,
             "pnl_usd": None,
             "notes": notes,
         }
-        self.trades.append(trade)
-        self._save_trades()
-        return trade
 
-    def record_outcome(self, trade_id: int, outcome: str, settlement_price: float = None):
+    def record_outcome(self, trade_id: int, outcome: str,
+                       settlement_price: float = None):
         """
-        Record the outcome of a settled trade. Call this when a Kalshi
-        contract resolves.
+        Record the outcome of a settled trade.
 
         Args:
             trade_id: The trade's ID from log_trade().
             outcome: 'win' or 'loss'.
             settlement_price: 1.0 if the event happened, 0.0 if not.
         """
-        for trade in self.trades:
-            if trade["id"] == trade_id:
-                trade["outcome"] = outcome
-                trade["settlement_price"] = settlement_price
+        row = self.conn.execute(
+            "SELECT * FROM trades WHERE id = ?", (trade_id,)
+        ).fetchone()
+        if row is None:
+            return
 
-                # Calculate P&L. If you bought YES at 0.62 and it settles YES:
-                # profit = (1.0 - 0.62) * num_contracts = $0.38 per contract
-                # If it settles NO: loss = -0.62 * num_contracts
-                cost_per = trade["market_prob"] if trade["side"] == "yes" else (1 - trade["market_prob"])
-                if outcome == "win":
-                    pnl = (1.0 - cost_per) * trade["num_contracts"]
-                else:
-                    pnl = -cost_per * trade["num_contracts"]
-                trade["pnl_usd"] = round(pnl, 2)
-                trade["settlement_time"] = datetime.now(timezone.utc).isoformat()
-                break
+        trade = dict(row)
+        cost_per = trade["market_prob"] if trade["side"] == "yes" \
+            else (1 - trade["market_prob"])
+        if outcome == "win":
+            pnl = (1.0 - cost_per) * trade["num_contracts"]
+        else:
+            pnl = -cost_per * trade["num_contracts"]
+        pnl = round(pnl, 2)
 
-        self._save_trades()
+        settlement_time = datetime.now(timezone.utc).isoformat()
+        self.conn.execute("""
+            UPDATE trades SET outcome = ?, settlement_price = ?,
+                pnl_usd = ?, settlement_time = ?
+            WHERE id = ?
+        """, (outcome, settlement_price, pnl, settlement_time, trade_id))
+        self.conn.commit()
+
+        # Update daily P&L
+        date_str = settlement_time[:10]
+        self._update_daily_pnl(date_str, trade["category"], pnl, outcome)
+
+    def _update_daily_pnl(self, date_str: str, category: str,
+                          pnl: float, outcome: str) -> None:
+        """Update the daily P&L aggregation table."""
+        win_inc = 1 if outcome == "win" else 0
+        loss_inc = 1 if outcome == "loss" else 0
+
+        self.conn.execute("""
+            INSERT INTO daily_pnl (date, category, realized_pnl, trade_count,
+                win_count, loss_count)
+            VALUES (?, ?, ?, 1, ?, ?)
+            ON CONFLICT(date, category) DO UPDATE SET
+                realized_pnl = realized_pnl + excluded.realized_pnl,
+                trade_count = trade_count + 1,
+                win_count = win_count + excluded.win_count,
+                loss_count = loss_count + excluded.loss_count
+        """, (date_str, category, pnl, win_inc, loss_inc))
+        self.conn.commit()
 
     # ── Performance Metrics ──────────────────────────────────────────────
 
     def settled_trades(self, category: Optional[str] = None) -> list:
         """Get all trades that have been settled (have outcomes)."""
-        trades = [t for t in self.trades if t["outcome"] is not None]
         if category:
-            trades = [t for t in trades if t["category"] == category]
-        return trades
+            rows = self.conn.execute(
+                "SELECT * FROM trades WHERE outcome IS NOT NULL AND category = ?",
+                (category,),
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                "SELECT * FROM trades WHERE outcome IS NOT NULL"
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    @property
+    def trades(self) -> list:
+        """All trades (for backward compat with tests and summary)."""
+        rows = self.conn.execute("SELECT * FROM trades ORDER BY id").fetchall()
+        return [dict(r) for r in rows]
 
     def hit_rate(self, category: Optional[str] = None) -> float:
         """Percentage of trades that were winners."""
@@ -185,7 +209,7 @@ class Tracker:
         """
         Brier score measures calibration. It's the mean squared difference
         between your predicted probabilities and actual outcomes.
-        
+
         A Brier score of 0.0 is perfect. 0.25 is random (coin flip).
         Anything below 0.20 on prediction markets is quite good.
         """
@@ -207,19 +231,30 @@ class Tracker:
         """
         settled = sorted(
             self.settled_trades(),
-            key=lambda t: t.get("settlement_time", t["entry_time"])
+            key=lambda t: t.get("settlement_time") or t["entry_time"]
         )
         cumulative = 0.0
         curve = []
         for t in settled:
             cumulative += t.get("pnl_usd", 0) or 0
             curve.append({"trade_id": t["id"], "cumulative_pnl": round(cumulative, 2),
-                          "time": t.get("settlement_time", t["entry_time"])})
+                          "time": t.get("settlement_time") or t["entry_time"]})
         return curve
+
+    def get_daily_pnl(self, days: int = 14) -> list:
+        """Get daily P&L records for the last N days."""
+        rows = self.conn.execute("""
+            SELECT date, category, realized_pnl, trade_count, win_count, loss_count
+            FROM daily_pnl
+            ORDER BY date DESC
+            LIMIT ?
+        """, (days * 3,)).fetchall()  # *3 for 3 categories
+        return [dict(r) for r in rows]
 
     def summary(self) -> str:
         """Generate a human-readable performance summary."""
-        total = len(self.trades)
+        all_trades = self.trades
+        total = len(all_trades)
         settled = self.settled_trades()
         n_settled = len(settled)
 
@@ -250,10 +285,11 @@ class Tracker:
     def export_csv(self):
         """Export all trades to CSV for spreadsheet analysis."""
         os.makedirs(os.path.dirname(self.performance_file), exist_ok=True)
-        if not self.trades:
+        all_trades = self.trades
+        if not all_trades:
             return
-        fieldnames = list(self.trades[0].keys())
+        fieldnames = list(all_trades[0].keys())
         with open(self.performance_file, "w", newline="") as f:
             writer = csv.DictWriter(f, fieldnames=fieldnames)
             writer.writeheader()
-            writer.writerows(self.trades)
+            writer.writerows(all_trades)

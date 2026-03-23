@@ -24,6 +24,7 @@ import requests
 from kalshi_client import KalshiClient
 import config
 from log import logger
+from screeners.utils import get_market_prob
 from snapshots import log_snapshot
 
 VOL_CACHE_FILE = os.path.join("data", "vol_cache.json")
@@ -196,8 +197,9 @@ class CryptoScreener:
             now = datetime.now(timezone.utc)
             days_to_expiry = (close_time - now).total_seconds() / 86400
 
-            # Include contracts expiring in 1-60 days (weekly and monthly)
-            return 1 <= days_to_expiry <= 60
+            # Include contracts expiring in 2 hours to 60 days
+            # (skip 15-minute contracts but keep same-day+ contracts)
+            return 0.08 <= days_to_expiry <= 60
         except Exception:
             return True
 
@@ -234,7 +236,7 @@ class CryptoScreener:
         model_prob = norm.cdf(d2)
 
         # Get market price (as probability)
-        market_prob = (market.get("last_price") or market.get("yes_ask") or 50) / 100.0
+        market_prob = get_market_prob(market)
         if market_prob <= 0 or market_prob >= 1:
             return None
 

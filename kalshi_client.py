@@ -21,6 +21,7 @@ class KalshiClient:
     def __init__(self):
         self.base_url = config.KALSHI_API_BASE
         self.email = config.KALSHI_EMAIL
+        self.api_id = config.KALSHI_API_ID
         self.private_key = self._load_private_key()
 
     def _load_private_key(self):
@@ -51,7 +52,7 @@ class KalshiClient:
         sig = self._sign_request(method, path, ts)
         return {
             "Content-Type": "application/json",
-            "KALSHI-ACCESS-KEY": self.email,
+            "KALSHI-ACCESS-KEY": self.api_id or self.email,
             "KALSHI-ACCESS-SIGNATURE": sig,
             "KALSHI-ACCESS-TIMESTAMP": str(ts),
         }
