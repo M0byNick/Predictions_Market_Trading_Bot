@@ -28,7 +28,7 @@ TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 
 # ── Bankroll & Allocation ────────────────────────────────────────────────────
-TOTAL_BANKROLL = 7500       # Starting bankroll in USD ($2500 per strategy)
+TOTAL_BANKROLL = 1_000_000  # Starting bankroll in USD (paper trading data gathering)
 ALLOCATION = {
     "crypto":    0.3333,    # $2500 to crypto event contracts
     "weather":   0.3333,    # $2500 to weather/climate contracts
@@ -43,7 +43,7 @@ KELLY_FRACTION = 0.25
 
 # Maximum percentage of category bankroll on a single trade.
 # Even if Kelly says bet 40%, this caps it. Safety rail.
-MAX_BET_FRACTION = 0.15
+MAX_BET_FRACTION = 0.0015    # Capped to keep positions <$500
 
 # Minimum edge (your_prob - market_prob) to consider a trade.
 # Below this threshold, transaction costs and model uncertainty eat the edge.

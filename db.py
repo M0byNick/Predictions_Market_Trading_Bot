@@ -42,6 +42,10 @@ def init_db(db_path: str) -> sqlite3.Connection:
             num_contracts   INTEGER NOT NULL,
             cost_usd        REAL NOT NULL,
             kelly_fraction  REAL NOT NULL,
+            full_kelly      REAL,
+            fractional_kelly REAL,
+            kelly_rec_usd   REAL,
+            kelly_multiplier REAL,
             entry_time      TEXT NOT NULL,
             outcome         TEXT CHECK(outcome IN ('win', 'loss')),
             settlement_price REAL,
@@ -90,8 +94,29 @@ def init_db(db_path: str) -> sqlite3.Connection:
     """)
 
     conn.commit()
+
+    # Schema migrations for existing databases
+    _migrate_kelly_columns(conn)
+
     logger.info("Database initialized at %s", db_path)
     return conn
+
+
+def _migrate_kelly_columns(conn: sqlite3.Connection) -> None:
+    """Add Kelly sizing columns to trades table if they don't exist."""
+    cursor = conn.execute("PRAGMA table_info(trades)")
+    existing_cols = {row[1] for row in cursor.fetchall()}
+
+    new_cols = [
+        ("full_kelly", "REAL"),
+        ("fractional_kelly", "REAL"),
+        ("kelly_rec_usd", "REAL"),
+        ("kelly_multiplier", "REAL"),
+    ]
+    for col_name, col_type in new_cols:
+        if col_name not in existing_cols:
+            conn.execute(f"ALTER TABLE trades ADD COLUMN {col_name} {col_type}")
+    conn.commit()
 
 
 @contextmanager

@@ -24,7 +24,7 @@ import config
 from log import logger
 
 PAPER_TRADES_FILE = os.path.join("data", "paper_trades.json")
-PAPER_STARTING_BALANCE = 7500_00  # cents ($2500 per strategy)
+PAPER_STARTING_BALANCE = 100_000_000  # cents ($1M paper trading)
 
 
 class PaperClient(KalshiClient):

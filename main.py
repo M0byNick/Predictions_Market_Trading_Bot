@@ -211,6 +211,12 @@ def process_opportunity(opp: dict, alerter: TelegramAlerter,
             except Exception as e:
                 logger.warning("Fill check failed (logging requested qty): %s", e)
 
+        # Compute Kelly sizing details for analysis
+        full_kelly_val = sizing.get("full_kelly_fraction", 0)
+        frac_kelly_val = sizing.get("fractional_kelly", 0)
+        kelly_rec_usd_val = round(frac_kelly_val * sizing.get("category_bankroll", 0), 2)
+        kelly_mult = round(actual_cost / kelly_rec_usd_val, 4) if kelly_rec_usd_val > 0 else 0
+
         # Log the trade with actual filled quantities
         tracker.log_trade(
             ticker=opp["ticker"],
@@ -221,6 +227,10 @@ def process_opportunity(opp: dict, alerter: TelegramAlerter,
             num_contracts=actual_contracts,
             cost_usd=actual_cost,
             kelly_fraction=sizing["capped_fraction"],
+            full_kelly=full_kelly_val,
+            fractional_kelly=frac_kelly_val,
+            kelly_rec_usd=kelly_rec_usd_val,
+            kelly_multiplier=kelly_mult,
             notes=opp.get("rationale", ""),
         )
 

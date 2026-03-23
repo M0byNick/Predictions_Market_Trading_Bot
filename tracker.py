@@ -71,10 +71,19 @@ class Tracker:
     def log_trade(self, ticker: str, category: str, side: str,
                   your_prob: float, market_prob: float,
                   num_contracts: int, cost_usd: float,
-                  kelly_fraction: float, notes: str = "") -> dict:
+                  kelly_fraction: float, notes: str = "",
+                  full_kelly: float = None, fractional_kelly: float = None,
+                  kelly_rec_usd: float = None,
+                  kelly_multiplier: float = None) -> dict:
         """
         Log a new trade at entry time. The outcome will be recorded
         later when the contract settles.
+
+        Kelly columns:
+          full_kelly: True Kelly fraction (f* = edge / (1 - market_prob))
+          fractional_kelly: full_kelly * KELLY_FRACTION (e.g. quarter-Kelly)
+          kelly_rec_usd: Dollar size Kelly recommends at current bankroll
+          kelly_multiplier: Ratio of actual cost to kelly_rec_usd (scale-down factor)
         """
         edge = round(your_prob - market_prob, 4) if side == "yes" \
             else round((1 - your_prob) - (1 - market_prob), 4)
@@ -83,10 +92,13 @@ class Tracker:
         cursor = self.conn.execute("""
             INSERT INTO trades (ticker, category, side, your_prob, market_prob,
                 edge_at_entry, num_contracts, cost_usd, kelly_fraction,
+                full_kelly, fractional_kelly, kelly_rec_usd, kelly_multiplier,
                 entry_time, notes)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (ticker, category, side, your_prob, market_prob, edge,
-              num_contracts, cost_usd, kelly_fraction, entry_time, notes))
+              num_contracts, cost_usd, kelly_fraction,
+              full_kelly, fractional_kelly, kelly_rec_usd, kelly_multiplier,
+              entry_time, notes))
         self.conn.commit()
 
         trade_id = cursor.lastrowid
@@ -102,6 +114,10 @@ class Tracker:
             "num_contracts": num_contracts,
             "cost_usd": cost_usd,
             "kelly_fraction": kelly_fraction,
+            "full_kelly": full_kelly,
+            "fractional_kelly": fractional_kelly,
+            "kelly_rec_usd": kelly_rec_usd,
+            "kelly_multiplier": kelly_multiplier,
             "entry_time": entry_time,
             "outcome": None,
             "settlement_price": None,
