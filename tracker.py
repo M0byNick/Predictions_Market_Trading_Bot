@@ -66,6 +66,14 @@ class Tracker:
         rows = self.conn.execute("SELECT * FROM pending_orders").fetchall()
         return [dict(r) for r in rows]
 
+    def get_open_positions_for_ticker(self, ticker: str) -> int:
+        """Return count of open (unsettled) trades for a given ticker."""
+        row = self.conn.execute(
+            "SELECT COUNT(*) FROM trades WHERE ticker = ? AND outcome IS NULL",
+            (ticker,),
+        ).fetchone()
+        return row[0] if row else 0
+
     # ── Trade Logging ─────────────────────────────────────────────────────
 
     def log_trade(self, ticker: str, category: str, side: str,

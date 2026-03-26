@@ -136,13 +136,31 @@ class EconomicsScreener:
 
             # Compute trend statistics
             recent_values = [v["value"] for v in values[:6]]  # Last 6 months
+            n = len(recent_values)
+            mean_6m = sum(recent_values) / n
+
+            # Standard deviation of recent values
+            if n >= 3:
+                variance = sum((v - mean_6m) ** 2 for v in recent_values) / (n - 1)
+                std_6m = variance ** 0.5
+            else:
+                std_6m = None
+
+            # Month-over-month changes (for CPI-type contracts)
+            changes = []
+            for i in range(len(values) - 1):
+                changes.append(values[i]["value"] - values[i + 1]["value"])
+            changes_6m = changes[:6] if len(changes) >= 6 else changes
+
             return {
                 "series_id": series_id,
                 "latest": values[0],
                 "previous": values[1] if len(values) > 1 else None,
-                "mean_6m": sum(recent_values) / len(recent_values),
+                "mean_6m": mean_6m,
+                "std_6m": std_6m,
                 "min_6m": min(recent_values),
                 "max_6m": max(recent_values),
+                "changes": changes_6m,
                 "trend": self._compute_trend(recent_values),
                 "values": values[:12],
             }
@@ -172,112 +190,169 @@ class EconomicsScreener:
             return "falling"
         return "stable"
 
+    def _model_probability(self, historical: dict, threshold: float,
+                           event_type: str, months_forward: int = 1) -> float | None:
+        """
+        Estimate P(next_value > threshold) using a normal distribution
+        fitted to recent FRED data.
+
+        months_forward: how many months until the contract's data release.
+        Uncertainty grows with sqrt(months_forward) to account for the
+        fact that we can't predict the economy 10 months out as well as 1.
+
+        Returns probability (0-1) or None if insufficient data.
+        """
+        from scipy.stats import norm
+        import math
+
+        # Uncertainty scaling factor: σ grows with sqrt of time
+        # 1 month → 1.0x, 4 months → 2.0x, 9 months → 3.0x
+        uncertainty_scale = max(math.sqrt(months_forward), 1.0)
+
+        if event_type in ("CPI", "NONFARM"):
+            # Model the change distribution
+            changes = historical.get("changes", [])
+            if len(changes) < 3:
+                return None
+            mu = sum(changes) / len(changes)
+            variance = sum((c - mu) ** 2 for c in changes) / (len(changes) - 1)
+            sigma = max(variance ** 0.5, 0.001) * uncertainty_scale
+            return float(1 - norm.cdf(threshold, loc=mu, scale=sigma))
+
+        elif event_type == "CPI_YOY":
+            std = historical.get("std_6m")
+            if std is None or std < 0.001:
+                return None
+            mu = historical["mean_6m"]
+            return float(1 - norm.cdf(threshold, loc=mu, scale=std * uncertainty_scale))
+
+        elif event_type == "FED_RATE":
+            # Fed rate: each FOMC meeting is ~6 weeks apart, rate can
+            # move 0-50bp per meeting. Historical rate cycles show the
+            # Fed can move 200-300bp in a year during cutting/hiking cycles.
+            # σ scales aggressively with time: 0.50 * sqrt(months)
+            # 1 month → 0.50, 6 months → 1.22, 12 months → 1.73
+            latest = historical["latest"]["value"]
+            sigma = 0.50 * math.sqrt(max(months_forward, 1))
+            return float(1 - norm.cdf(threshold, loc=latest, scale=sigma))
+
+        else:
+            # GDP, UNEMPLOYMENT: model level distribution
+            std = historical.get("std_6m")
+            if std is None or std < 0.001:
+                return None
+            mu = historical["mean_6m"]
+            return float(1 - norm.cdf(threshold, loc=mu, scale=std * uncertainty_scale))
+
+    def _heuristic_flags(self, historical: dict, threshold: float | None,
+                         market_prob: float) -> list:
+        """
+        Original heuristic flags — kept as supporting evidence in rationale.
+        No longer used for edge estimation.
+        """
+        flags = []
+        if historical and threshold is not None:
+            latest_value = historical["latest"]["value"]
+            trend = historical["trend"]
+
+            if trend == "rising" and market_prob < 0.50:
+                flags.append("trend_rising")
+            elif trend == "falling" and market_prob > 0.50:
+                flags.append("trend_falling")
+
+            if market_prob < 0.10:
+                if historical["min_6m"] <= threshold <= historical["max_6m"]:
+                    flags.append("cheap_tail_in_range")
+
+            if latest_value:
+                distance_pct = abs(latest_value - threshold) / latest_value if latest_value else 0
+                if distance_pct < 0.02:
+                    flags.append("near_threshold")
+
+        return flags
+
     def _evaluate_market(self, market: dict, historical: dict | None,
                          event_type: str) -> dict | None:
         """
-        Evaluate a specific Kalshi economics contract.
+        Evaluate a Kalshi economics contract using a quantitative
+        normal distribution model fitted to recent FRED data.
 
-        Since we don't have strong predictive models for economic data
-        (that's the hard part — institutional quants spend billions on this),
-        we focus on two types of edges:
-
-        1. TAIL MISPRICING: Markets systematically underprice extreme outcomes.
-           If the contract asks "Will CPI be above 4.0%?" and it's priced at 3%,
-           but recent CPI has been trending up and is at 3.5%, the tail risk
-           is probably higher than 3%.
-
-        2. TREND DISAGREEMENT: If the trend is clearly rising but the market
-           prices a "will it be below X" contract as if it's a coin flip,
-           the market may be anchoring on older data.
-
-        This screener is intentionally conservative — it flags opportunities
-        for your manual review rather than auto-trading.
+        Phase 5 upgrade: replaces heuristic edge estimates with
+        model-driven probabilities. Heuristic flags are kept as
+        supporting evidence in the rationale.
         """
-        import re
-
         # Get market price
         market_prob = get_market_prob(market)
         if market_prob <= 0 or market_prob >= 1:
             return None
 
-        # We can't build a strong probability model without deep macro research,
-        # so this screener flags markets for manual review based on heuristics.
-        # The flags are:
+        # Parse threshold from market title
+        threshold = self._parse_threshold(market, event_type)
 
-        flags = []
-        estimated_edge = 0.0
-        your_prob = market_prob  # Default: trust the market
+        # Compute months until data release from close_time
+        months_forward = 1
+        close_time_str = market.get("close_time", "") or market.get("expiration_time", "")
+        if close_time_str:
+            try:
+                from datetime import datetime, timezone
+                close_dt = datetime.fromisoformat(close_time_str.replace("Z", "+00:00"))
+                now = datetime.now(timezone.utc)
+                months_forward = max(int((close_dt - now).days / 30), 1)
+            except Exception:
+                pass
 
-        if historical:
-            latest_value = historical["latest"]["value"]
-            trend = historical["trend"]
+        # Try quantitative model
+        model_prob = None
+        model_std = None
+        if historical and threshold is not None:
+            model_prob = self._model_probability(
+                historical, threshold, event_type, months_forward=months_forward
+            )
+            model_std = historical.get("std_6m")
 
-            # Parse threshold from market title
-            threshold = self._parse_threshold(market, event_type)
-
-            if threshold is not None:
-                # Heuristic 1: Is the market ignoring the trend?
-                if trend == "rising" and "above" in market.get("title", "").lower():
-                    # Rising trend + "above X" contract → market might be too low
-                    if market_prob < 0.50:
-                        flags.append("trend_bullish_but_market_bearish")
-                        # Modest edge estimate — this is heuristic, not model
-                        estimated_edge = 0.08
-
-                elif trend == "falling" and "below" in market.get("title", "").lower():
-                    if market_prob < 0.50:
-                        flags.append("trend_bearish_but_market_bullish")
-                        estimated_edge = 0.08
-
-                # Heuristic 2: Tail mispricing — very cheap contracts on plausible outcomes
-                if market_prob < 0.10:
-                    # Is this outcome actually within recent range?
-                    if threshold and historical["min_6m"] <= threshold <= historical["max_6m"]:
-                        flags.append("cheap_tail_within_recent_range")
-                        estimated_edge = 0.05
-
-                # Heuristic 3: Current value already near threshold
-                if threshold:
-                    distance_pct = abs(latest_value - threshold) / latest_value if latest_value else 0
-                    if distance_pct < 0.02 and (market_prob < 0.35 or market_prob > 0.65):
-                        flags.append("close_to_threshold_but_extreme_pricing")
-                        estimated_edge = 0.10
+        # Heuristic flags for rationale (not used for edge)
+        flags = self._heuristic_flags(historical, threshold, market_prob) if historical else []
 
         snap = {
             "screener": "economics",
             "ticker": market.get("ticker", ""),
             "event_type": event_type,
+            "months_forward": months_forward,
             "market_prob": round(market_prob, 4),
+            "model_prob": round(model_prob, 4) if model_prob is not None else None,
+            "model_std": round(model_std, 4) if model_std is not None else None,
             "flags": flags,
             "trend": historical.get("trend", "unknown") if historical else "no_data",
             "latest_value": historical["latest"]["value"] if historical else None,
-            "estimated_edge": round(estimated_edge, 4),
         }
 
-        if not flags:
-            snap.update(decision="skip", reason="no heuristic flags")
+        if model_prob is None:
+            snap.update(decision="skip", reason="no model probability")
             log_snapshot(snap, cycle_id=getattr(self, "_cycle_id", None))
-            return None  # Nothing interesting here
+            return None
 
-        # Determine side based on flags
-        side = "yes"
-        your_prob = min(market_prob + estimated_edge, 0.95)
+        # Determine side and edge from quantitative model
+        edge_yes = model_prob - market_prob
+        edge_no = market_prob - model_prob
 
-        if "bearish" in str(flags) and "below" in market.get("title", "").lower():
+        if edge_yes >= config.MIN_EDGE_THRESHOLD:
             side = "yes"
-        elif "bullish" in str(flags) and "above" in market.get("title", "").lower():
-            side = "yes"
-
-        edge = your_prob - market_prob if side == "yes" else market_prob - your_prob
-
-        if edge < config.MIN_EDGE_THRESHOLD:
-            snap.update(decision="skip", reason="edge below threshold")
+            edge = edge_yes
+            your_prob = model_prob
+        elif edge_no >= config.MIN_EDGE_THRESHOLD:
+            side = "no"
+            edge = edge_no
+            your_prob = 1 - model_prob
+        else:
+            snap.update(decision="skip", reason="edge below threshold",
+                        edge_yes=round(edge_yes, 4), edge_no=round(edge_no, 4))
             log_snapshot(snap, cycle_id=getattr(self, "_cycle_id", None))
             return None
 
         snap.update(decision="trade", side=side, edge=round(edge, 4))
         log_snapshot(snap, cycle_id=getattr(self, "_cycle_id", None))
 
+        flag_str = f" Flags: {', '.join(flags)}." if flags else ""
         return {
             "ticker": market.get("ticker", ""),
             "title": market.get("title", ""),
@@ -288,14 +363,19 @@ class EconomicsScreener:
             "market_prob": round(market_prob, 4),
             "edge": round(edge, 4),
             "flags": flags,
-            "manual_review": True,  # Always flag econ trades for manual review
             "trend": historical.get("trend", "unknown") if historical else "no_data",
             "latest_value": historical["latest"]["value"] if historical else None,
+            "model_std": round(model_std, 4) if model_std is not None else None,
             "rationale": (
-                f"Econ screener flags: {', '.join(flags)}. "
-                f"Trend: {historical.get('trend', 'N/A') if historical else 'N/A'}. "
-                f"Latest: {historical['latest']['value'] if historical else 'N/A'}. "
-                f"⚠️ Manual review recommended — edge is heuristic, not model-driven."
+                f"Quantitative model: P(>{threshold}) = {model_prob:.1%} "
+                f"vs market {market_prob:.1%}. "
+                f"μ={historical['mean_6m']:.2f}, σ={model_std:.3f}. "
+                f"Trend: {historical.get('trend', 'N/A')}."
+                + flag_str
+            ) if historical and model_std else (
+                f"Model: P(>{threshold}) = {model_prob:.1%} "
+                f"vs market {market_prob:.1%}."
+                + flag_str
             ),
         }
 

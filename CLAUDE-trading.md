@@ -30,7 +30,7 @@ Screeners (30m interval)
 - `MIN_EDGE_THRESHOLD = 0.05` — no trade below 5% edge
 - `MAX_BET_FRACTION = 0.0015` — caps position at ~$500 on $1M bankroll
 - Minimum position $5 — skip if sizing is trivially small
-- Economics uses reduced Kelly (0.10) due to heuristic edge
+- Economics uses reduced Kelly (0.15) — model-based edge (Phase 5, was 0.10 heuristic)
 
 **Kelly columns stored per trade** (added Tier 3):
 | Column | Description |
@@ -51,7 +51,7 @@ Screeners (30m interval)
 - **Market data**: Real Kalshi API (live prices, orderbooks)
 - **Orders**: Simulated locally with instant fills at requested price
 - **Balance/positions**: Tracked in `data/paper_trades.json`
-- **Settlement**: Manual via `settle(ticker, result)` method
+- **Settlement**: Automatic via `check_settlements()` each cycle (see below); also manual via `settle(ticker, result)`
 
 Current config: $1M bankroll, auto-execute all strategies, ~$500 max position.
 
@@ -61,6 +61,23 @@ Current config: $1M bankroll, auto-execute all strategies, ~$500 max position.
 2. After fill confirmation: `tracker.clear_pending(ticker, side)`
 3. On restart: `reconcile_pending_orders()` checks each pending order's fill status via API
 4. Orphaned orders are either logged as recovered trades or cleared with alerts
+
+## Auto-Settlement (`main.py:check_settlements`)
+
+Every main loop cycle, `check_settlements()` runs after screening and trading:
+
+1. Query SQLite for all open trades (`outcome IS NULL`)
+2. Group by ticker to minimize API calls
+3. For each unique ticker, call `client.get_market(ticker)` to check status
+4. If `status == "settled"`, read the `result` field ("yes" or "no")
+5. For each trade on that ticker:
+   - Determine win/loss by comparing `trade.side` to market result
+   - Call `tracker.record_outcome(id, outcome, settlement_price)` — updates outcome, pnl_usd, settlement_time
+   - If paper trading, call `client.settle_position()` to update paper balance
+   - Send Telegram settlement notification with P&L
+6. API errors for individual tickers are caught and skipped (other tickers still settle)
+
+This replaces the need for manual settlement and ensures P&L is tracked automatically as markets close.
 
 ## Telegram Alerts (`alerts.py`)
 

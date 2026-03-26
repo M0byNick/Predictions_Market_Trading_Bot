@@ -20,9 +20,8 @@ import config
 DB_PATH = config.DB_PATH
 
 
-@st.cache_resource
 def get_connection():
-    """Get a read-only SQLite connection."""
+    """Get a read-only SQLite connection (no cache — always fresh data)."""
     if not os.path.exists(DB_PATH):
         return None
     conn = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True, check_same_thread=False)
@@ -170,7 +169,7 @@ if not settled.empty and len(settled) >= 5:
 
     # Reliability diagram
     chart_data = cal_grouped[["avg_predicted", "actual_frequency"]].copy()
-    chart_data.index = cal_grouped["avg_predicted"]
+    chart_data = chart_data.set_index("avg_predicted")
     st.line_chart(chart_data, use_container_width=True)
     st.caption("Perfect calibration = points on the diagonal. Above = underconfident. Below = overconfident.")
 
@@ -221,4 +220,6 @@ st.divider()
 st.caption("Auto-refreshes every 30 seconds. Data is read-only from SQLite.")
 
 # Auto-refresh every 30 seconds
-st.empty()
+import time
+time.sleep(30)
+st.rerun()

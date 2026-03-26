@@ -230,6 +230,179 @@ class CalibrationAnalyzer:
             "details": details,
         }
 
+    # ── Phase 6: Advanced Diagnostics ──────────────────────────────────
+
+    def expected_vs_realized_edge(self, category: Optional[str] = None) -> list:
+        """
+        Compare claimed edge at entry to actual win rate per edge bucket.
+        If claimed edge is 20% but realized win rate is 5%, model is drifting.
+        """
+        trades = self._get_settled_trades(category)
+        if not trades:
+            return []
+
+        buckets = defaultdict(lambda: {"edges": [], "outcomes": []})
+        for t in trades:
+            edge = t["edge_at_entry"]
+            actual = 1.0 if t["outcome"] == "win" else 0.0
+            # Bucket by 10% edge ranges
+            bucket_idx = min(int(edge * 10), 4)  # 0-10%, 10-20%, ..., 40%+
+            lo = bucket_idx * 10
+            hi = lo + 10 if bucket_idx < 4 else 50
+            key = f"{lo}-{hi}%"
+            buckets[key]["edges"].append(edge)
+            buckets[key]["outcomes"].append(actual)
+
+        results = []
+        for key in sorted(buckets.keys(), key=lambda x: int(x.split("-")[0])):
+            data = buckets[key]
+            avg_edge = sum(data["edges"]) / len(data["edges"])
+            win_rate = sum(data["outcomes"]) / len(data["outcomes"])
+            results.append({
+                "edge_bucket": key,
+                "count": len(data["edges"]),
+                "avg_claimed_edge": round(avg_edge, 4),
+                "actual_win_rate": round(win_rate, 4),
+                "gap": round(avg_edge - win_rate, 4),
+            })
+        return results
+
+    def brier_by_days_out(self, category: Optional[str] = None) -> list:
+        """
+        Brier score by days-to-settlement to detect where models perform
+        best/worst. Weather should improve near settlement; econ should
+        degrade far out.
+        """
+        trades = self._get_settled_trades(category)
+        if not trades:
+            return []
+
+        buckets = defaultdict(list)
+        for t in trades:
+            entry = t.get("entry_time", "")
+            settle = t.get("settlement_time", "")
+            if not entry or not settle:
+                continue
+            try:
+                entry_dt = datetime.fromisoformat(entry)
+                settle_dt = datetime.fromisoformat(settle)
+                days = max((settle_dt - entry_dt).days, 0)
+            except Exception:
+                continue
+
+            predicted = t["your_prob"] if t["side"] == "yes" else (1 - t["your_prob"])
+            actual = 1.0 if t["outcome"] == "win" else 0.0
+            sq_err = (predicted - actual) ** 2
+
+            # Bucket: 0d, 1d, 2-3d, 4-7d, 8-14d, 15+d
+            if days == 0:
+                key = "0d"
+            elif days == 1:
+                key = "1d"
+            elif days <= 3:
+                key = "2-3d"
+            elif days <= 7:
+                key = "4-7d"
+            elif days <= 14:
+                key = "8-14d"
+            else:
+                key = "15+d"
+            buckets[key].append({"sq_err": sq_err, "cat": t["category"]})
+
+        order = ["0d", "1d", "2-3d", "4-7d", "8-14d", "15+d"]
+        results = []
+        for key in order:
+            if key not in buckets:
+                continue
+            items = buckets[key]
+            brier = sum(i["sq_err"] for i in items) / len(items)
+            results.append({
+                "days_bucket": key,
+                "count": len(items),
+                "brier": round(brier, 4),
+            })
+        return results
+
+    def penny_market_split(self, threshold: float = 0.05) -> dict:
+        """
+        Separate calibration for penny markets (≤5¢) vs normal markets.
+        Penny markets are where most weather losses occurred pre-fix.
+        """
+        trades = self._get_settled_trades()
+        if not trades:
+            return {}
+
+        result = {}
+        for label, filter_fn in [
+            (f"penny (≤{int(threshold*100)}¢)", lambda t: t["market_prob"] <= threshold),
+            (f"normal (>{int(threshold*100)}¢)", lambda t: t["market_prob"] > threshold),
+        ]:
+            subset = [t for t in trades if filter_fn(t)]
+            if not subset:
+                result[label] = {"count": 0}
+                continue
+
+            wins = sum(1 for t in subset if t["outcome"] == "win")
+            brier = sum(
+                ((t["your_prob"] if t["side"] == "yes" else 1-t["your_prob"])
+                 - (1.0 if t["outcome"] == "win" else 0.0)) ** 2
+                for t in subset
+            ) / len(subset)
+            total_pnl = sum(t.get("pnl_usd", 0) or 0 for t in subset)
+
+            result[label] = {
+                "count": len(subset),
+                "wins": wins,
+                "hit_rate": round(wins / len(subset), 4),
+                "brier": round(brier, 4),
+                "pnl": round(total_pnl, 2),
+            }
+        return result
+
+    def model_version_comparison(self) -> dict:
+        """
+        Compare calibration before and after the contract-type fix.
+        Uses entry_time as a proxy for code version.
+        """
+        # The fix went live around 2026-03-25T04:00:00Z
+        cutoff = "2026-03-25T04:00:00"
+        result = {}
+
+        for label, where in [
+            ("pre-fix", f"entry_time < '{cutoff}'"),
+            ("post-fix", f"entry_time >= '{cutoff}'"),
+        ]:
+            rows = self.conn.execute(
+                f"SELECT * FROM trades WHERE outcome IS NOT NULL AND {where}"
+            ).fetchall()
+            trades = [dict(r) for r in rows]
+            if not trades:
+                result[label] = {"count": 0}
+                continue
+
+            wins = sum(1 for t in trades if t["outcome"] == "win")
+            brier = sum(
+                ((t["your_prob"] if t["side"] == "yes" else 1-t["your_prob"])
+                 - (1.0 if t["outcome"] == "win" else 0.0)) ** 2
+                for t in trades
+            ) / len(trades)
+            bias = sum(
+                (t["your_prob"] if t["side"] == "yes" else 1-t["your_prob"])
+                - (1.0 if t["outcome"] == "win" else 0.0)
+                for t in trades
+            ) / len(trades)
+            total_pnl = sum(t.get("pnl_usd", 0) or 0 for t in trades)
+
+            result[label] = {
+                "count": len(trades),
+                "wins": wins,
+                "hit_rate": round(wins / len(trades), 4),
+                "brier": round(brier, 4),
+                "bias": round(bias, 4),
+                "pnl": round(total_pnl, 2),
+            }
+        return result
+
     # ── Reports ─────────────────────────────────────────────────────────
 
     def full_report(self, category: Optional[str] = None) -> str:
@@ -298,6 +471,65 @@ class CalibrationAnalyzer:
                 lines.append(
                     f"  {row['window_start']:>10s} {row['brier_score']:.4f} "
                     f"({row['trade_count']:>3d} trades) {bar}"
+                )
+
+        # Expected vs Realized edge
+        evr = self.expected_vs_realized_edge(category)
+        if evr:
+            lines.append(f"\n  {'─' * 50}")
+            lines.append(f"  Expected vs Realized Edge")
+            lines.append(f"  {'─' * 50}")
+            lines.append(f"  {'Edge Bucket':>12s} {'Count':>6s} {'Claimed':>8s} {'Actual':>8s} {'Gap':>8s}")
+            for row in evr:
+                lines.append(
+                    f"  {row['edge_bucket']:>12s} {row['count']:>6d} "
+                    f"{row['avg_claimed_edge']:>8.1%} {row['actual_win_rate']:>8.1%} "
+                    f"{row['gap']:>+8.1%}"
+                )
+
+        # Brier by days to settlement
+        bdays = self.brier_by_days_out(category)
+        if bdays:
+            lines.append(f"\n  {'─' * 50}")
+            lines.append(f"  Brier Score by Days to Settlement")
+            lines.append(f"  {'─' * 50}")
+            lines.append(f"  {'Days':>8s} {'Count':>6s} {'Brier':>8s}")
+            for row in bdays:
+                bar = "█" * int(row["brier"] * 40)
+                lines.append(f"  {row['days_bucket']:>8s} {row['count']:>6d} {row['brier']:>8.4f} {bar}")
+
+        # Penny market split
+        penny = self.penny_market_split()
+        if penny:
+            lines.append(f"\n  {'─' * 50}")
+            lines.append(f"  Penny Market Split (≤5¢ vs >5¢)")
+            lines.append(f"  {'─' * 50}")
+            for label, data in penny.items():
+                if data["count"] == 0:
+                    continue
+                lines.append(
+                    f"  {label:>16s}: {data['count']:>5d} trades, "
+                    f"{data['hit_rate']:>5.1%} hit, "
+                    f"Brier={data['brier']:.4f}, "
+                    f"P&L=${data['pnl']:>10,.2f}"
+                )
+
+        # Model version comparison
+        mvc = self.model_version_comparison()
+        if mvc:
+            lines.append(f"\n  {'─' * 50}")
+            lines.append(f"  Model Version Comparison (pre-fix vs post-fix)")
+            lines.append(f"  {'─' * 50}")
+            for label, data in mvc.items():
+                if data["count"] == 0:
+                    lines.append(f"  {label:>10s}: no settled trades")
+                    continue
+                lines.append(
+                    f"  {label:>10s}: {data['count']:>5d} trades, "
+                    f"{data['hit_rate']:>5.1%} hit, "
+                    f"Brier={data['brier']:.4f}, "
+                    f"bias={data['bias']:+.4f}, "
+                    f"P&L=${data['pnl']:>10,.2f}"
                 )
 
         lines.append(f"\n{'═' * 60}\n")

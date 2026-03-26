@@ -24,10 +24,10 @@ WAL mode enabled for concurrent reads (dashboard, calibration) while bot writes.
 | kelly_rec_usd | REAL | Dollar amount Kelly recommends at current bankroll |
 | kelly_multiplier | REAL | actual_cost / kelly_rec_usd (live deployment scaling factor) |
 | entry_time | TEXT | ISO 8601 UTC |
-| outcome | TEXT | win, loss, or NULL (open) |
-| settlement_price | REAL | 1.0 or 0.0 |
-| pnl_usd | REAL | Realized P&L |
-| settlement_time | TEXT | ISO 8601 UTC |
+| outcome | TEXT | win, loss, or NULL (open) — auto-set by `check_settlements()` |
+| settlement_price | REAL | 1.0 or 0.0 — auto-set by `check_settlements()` |
+| pnl_usd | REAL | Realized P&L — auto-set by `check_settlements()` |
+| settlement_time | TEXT | ISO 8601 UTC — auto-set by `check_settlements()` |
 | notes | TEXT | Screener rationale |
 
 **`pending_orders`** — Crash recovery for in-flight orders

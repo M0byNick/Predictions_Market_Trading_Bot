@@ -4,10 +4,12 @@ Three screeners run every 30 minutes, each targeting a different Kalshi market c
 
 ## Crypto Screener (`screeners/crypto.py`)
 
-**Model**: Log-normal diffusion (Black-Scholes-style)
-- P(S_T > K) = N(d2) where d2 = (ln(S/K) - 0.5σ²T) / (σ√T)
-- Assumes zero drift (conservative)
+**Model**: Log-normal diffusion with sentiment drift (Phase 5)
+- P(S_T > K) = N(d2) where d2 = (ln(S/K) + (μ - 0.5σ²)T) / (σ√T)
+- μ = sentiment-derived drift from Fear & Greed Index (contrarian: fear→bullish, greed→bearish)
+- Drift capped at ±5% annualized (`SENTIMENT_MAX_DRIFT`), toggled via `USE_SENTIMENT_SIGNALS`
 - 30-day realized volatility from CoinGecko, cached 4 hours in `data/vol_cache.json`
+- FGI cached alongside vol with same 4h TTL
 
 **Markets monitored**:
 - Series: `KXBTC` (Bitcoin), `KXETH` (Ethereum), `KXSOL` (Solana)
@@ -17,18 +19,21 @@ Three screeners run every 30 minutes, each targeting a different Kalshi market c
 **Data sources**:
 - CoinGecko free API — spot prices (no key needed)
 - CoinGecko market_chart — 30-day daily prices for realized vol
+- Alternative.me Fear & Greed Index API — free, no key (Phase 5)
 
 **Known limitations**:
-- Vol model is simple — doesn't account for vol regimes, skew, or term structure
-- No on-chain signals yet (planned: fear/greed, exchange flows, funding rates)
+- Vol model doesn't account for vol regimes, skew, or term structure
+- FGI is contrarian only — no exchange flow or funding rate signals yet
 - Contracts expiring < 2 hours are filtered (was 1 day, relaxed in Tier 3)
 
 ## Weather Screener (`screeners/weather.py`)
 
-**Model**: Normal distribution around NWS point forecast
+**Model**: Normal distribution around NWS point forecast with dynamic sigma (Phase 5)
 - P(high > threshold) = 1 - Φ((threshold - forecast) / σ)
-- σ = forecast uncertainty, calibrated by days-out (closer = tighter)
-- Default σ ≈ 2.5°F for 1-day forecasts
+- σ = dynamic from NWS gridpoint temperature spread (min/max → 90% CI → σ = spread/3.29)
+- Falls back to static σ lookup by days-out if gridpoint data unavailable
+- Static defaults: 2.0°F (same-day) to 5.5°F (7-day), floor 1.5°F for dynamic
+- Toggled via `USE_DYNAMIC_SIGMA` config
 
 **Markets monitored**:
 - `KXHIGHNY` — NYC daily high temp
@@ -38,19 +43,22 @@ Three screeners run every 30 minutes, each targeting a different Kalshi market c
 
 **Data sources**:
 - NWS API (`api.weather.gov`) — free, no key, point forecasts + hourly
+- NWS gridpoints API — temperature min/max arrays for dynamic sigma (Phase 5)
 - Settlement source: NWS Daily Climate Report / NOWData (same source = built-in edge)
 
 **Known limitations**:
-- Single-model forecast (NWS only) — no ensemble with GFS/ECMWF yet
 - Normal distribution assumption may not capture tail weather events
-- σ calibration is static — should be dynamic based on forecast skill by lead time
+- Dynamic sigma uses NWS gridpoint spread, not raw GFS ensemble members
+- No ECMWF integration
 
 ## Economics Screener (`screeners/economics.py`)
 
-**Model**: Heuristic-based (not quantitative)
-- Flags: trend disagreement, cheap tails within recent range, threshold proximity
-- Uses FRED API for historical data trends
-- Reduced Kelly fraction (0.10 vs 0.25) due to lower confidence
+**Model**: Quantitative normal distribution (Phase 5, replaces heuristics)
+- CPI/NONFARM: fits N(μ, σ²) to month-over-month changes, P(next_change > threshold)
+- CPI_YOY/GDP/UNEMPLOYMENT: fits N(μ, σ²) to level distribution
+- FED_RATE: level-based with tight σ=0.20 (rates move in 25bp increments)
+- Heuristic flags (trend, cheap tail, near threshold) kept as rationale evidence only
+- Kelly fraction 0.15 (bumped from 0.10 — model-based edge warrants more confidence)
 
 **Markets monitored**:
 - `KXCPI` — Monthly CPI change (e.g., "Will CPI rise >0.8% in March?")
@@ -62,9 +70,10 @@ Three screeners run every 30 minutes, each targeting a different Kalshi market c
 - Series IDs: CPIAUCSL, CPIAUCNS, DFEDTARU, UNRATE, PAYEMS, GDP
 
 **Known limitations**:
-- Edge estimates are heuristic, not model-driven — manual review recommended
+- Normal distribution may not capture fat tails in economic data
 - No consensus estimate tracking yet (planned: Bloomberg/FRED survey data)
 - No BLS release schedule automation
+- Fed rate model is simplistic (fixed σ=0.20, no dot plot integration)
 
 ## Shared Utilities (`screeners/utils.py`)
 

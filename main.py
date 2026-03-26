@@ -78,9 +78,30 @@ def process_opportunity(opp: dict, alerter: TelegramAlerter,
     Returns True if a trade was executed, False otherwise.
     """
     category = opp["category"]
+    edge = opp.get("edge", 0)
+    market_prob = opp.get("market_prob", 0.5)
+    side = opp.get("side", "yes")
+
+    # ── Overconfidence guardrail ──────────────────────────────────────
+    # Reject trades where the claimed edge is implausibly large.
+    # A 50%+ edge almost always means the model is wrong, not that
+    # we found a 50¢ bill on the ground. Real edges are 5-30%.
+    if edge > config.MAX_EDGE_THRESHOLD:
+        logger.info("GUARDRAIL: Skip %s — edge %.1f%% exceeds max %.0f%%",
+                     opp['ticker'], edge * 100, config.MAX_EDGE_THRESHOLD * 100)
+        return False
+
+    # ── Per-ticker position limit ─────────────────────────────────────
+    # Prevent stacking: only allow one open position per ticker.
+    # Without this, the bot adds ~$500 every 30min cycle on the same contract.
+    existing = tracker.get_open_positions_for_ticker(opp["ticker"])
+    if existing > 0:
+        logger.debug("Skip %s — already have %d open position(s)", opp['ticker'], existing)
+        return False
+
     cat_bankroll = category_bankroll(category)
 
-    # Economics uses a reduced Kelly fraction due to heuristic edge estimates
+    # Economics uses a reduced Kelly fraction due to model-based edge
     kelly_ovr = config.ECON_MAX_KELLY_FRACTION if category == "economics" else None
 
     # Calculate position sizing
@@ -253,6 +274,86 @@ def process_opportunity(opp: dict, alerter: TelegramAlerter,
         return False
 
 
+def check_settlements(tracker: Tracker, client: KalshiClient,
+                      alerter: TelegramAlerter) -> int:
+    """
+    Check all open trades for settlements. For each unique ticker with open
+    trades, query the Kalshi API to see if the market has settled. If so,
+    determine win/loss and update the tracker + paper client.
+
+    Returns the number of trades settled this cycle.
+    """
+    from paper_client import PaperClient
+
+    # Get all open trades (outcome is NULL)
+    rows = tracker.conn.execute(
+        "SELECT id, ticker, side, category FROM trades WHERE outcome IS NULL"
+    ).fetchall()
+    open_trades = [dict(r) for r in rows]
+
+    if not open_trades:
+        return 0
+
+    # Group by ticker to minimize API calls
+    ticker_trades = {}
+    for trade in open_trades:
+        ticker_trades.setdefault(trade["ticker"], []).append(trade)
+
+    settled_count = 0
+    for ticker, trades in ticker_trades.items():
+        try:
+            market_data = client.get_market(ticker)
+            market = market_data.get("market", market_data)
+            status = market.get("status", "")
+
+            if status not in ("settled", "finalized"):
+                continue
+
+            # Determine the actual result
+            # Kalshi settled markets have a "result" field: "yes" or "no"
+            result = market.get("result", "")
+            if result not in ("yes", "no"):
+                # Some markets use settlement_value instead
+                settlement_val = market.get("settlement_value")
+                if settlement_val is not None:
+                    result = "yes" if settlement_val > 0 else "no"
+                else:
+                    logger.warning("Settled market %s has no result field: %s", ticker, market)
+                    continue
+
+            settlement_price = 1.0 if result == "yes" else 0.0
+
+            for trade in trades:
+                won = (trade["side"] == result)
+                outcome = "win" if won else "loss"
+
+                tracker.record_outcome(trade["id"], outcome, settlement_price)
+
+                # Settle paper position too
+                if isinstance(client, PaperClient):
+                    client.settle_position(ticker, trade["side"], result)
+
+                # Get the updated trade for P&L
+                updated = tracker.conn.execute(
+                    "SELECT pnl_usd FROM trades WHERE id = ?", (trade["id"],)
+                ).fetchone()
+                pnl = updated["pnl_usd"] if updated else 0.0
+
+                logger.info("Settled: %s %s → %s (P&L: $%.2f)",
+                            trade["side"].upper(), ticker, outcome.upper(), pnl)
+                alerter.send_settlement(ticker, outcome, pnl)
+                settled_count += 1
+
+        except Exception as e:
+            logger.warning("Settlement check failed for %s: %s", ticker, e)
+            continue
+
+    if settled_count > 0:
+        logger.info("Settled %d trade(s) this cycle", settled_count)
+
+    return settled_count
+
+
 def reconcile_pending_orders(tracker: Tracker, client: KalshiClient,
                              alerter: TelegramAlerter) -> None:
     """Check for orphaned orders from a previous crash and reconcile them."""
@@ -339,6 +440,18 @@ def main_loop():
     while True:
         try:
             cycle_count += 1
+
+            # Check for settled contracts and update tracker
+            try:
+                open_count = tracker.conn.execute(
+                    "SELECT COUNT(*) FROM trades WHERE outcome IS NULL"
+                ).fetchone()[0]
+                logger.info("Settlement check: %d open trades to scan", open_count)
+                settled = check_settlements(tracker, client, alerter)
+                if settled:
+                    logger.info("Settlement check: %d trade(s) resolved", settled)
+            except Exception as e:
+                logger.warning("Settlement check error: %s", e)
 
             # Run all screeners
             opportunities = run_screeners(

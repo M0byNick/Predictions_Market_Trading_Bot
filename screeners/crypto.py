@@ -29,6 +29,7 @@ from snapshots import log_snapshot
 
 VOL_CACHE_FILE = os.path.join("data", "vol_cache.json")
 VOL_CACHE_MAX_AGE_SECONDS = 4 * 3600  # 4 hours
+FGI_CACHE_KEY = "_fgi"  # Key in vol_cache.json for Fear & Greed Index
 
 
 class CryptoScreener:
@@ -56,6 +57,14 @@ class CryptoScreener:
         """
         opportunities = []
         self._cycle_id = cycle_id
+
+        # Fetch sentiment data once per screening cycle
+        fgi = None
+        if config.USE_SENTIMENT_SIGNALS:
+            fgi = self._get_fear_greed_index()
+            if fgi is not None:
+                drift = self.sentiment_to_drift(fgi)
+                logger.info("Fear & Greed Index: %d → drift=%.3f", fgi, drift)
 
         for ticker in config.CRYPTO_TICKERS:
             series = self.SERIES_MAP.get(ticker)
@@ -85,7 +94,7 @@ class CryptoScreener:
             markets = [m for m in markets if self._is_target_timeframe(m)]
 
             for market in markets:
-                opp = self._evaluate_market(market, spot, vol, ticker)
+                opp = self._evaluate_market(market, spot, vol, ticker, fgi=fgi)
                 if opp:
                     opportunities.append(opp)
 
@@ -182,6 +191,90 @@ class CryptoScreener:
         with open(VOL_CACHE_FILE, "w") as f:
             json.dump(cache, f, indent=2)
 
+    def _get_fear_greed_index(self) -> int | None:
+        """
+        Fetch the Crypto Fear & Greed Index (0-100).
+        Free API, no key needed. Cached in vol_cache.json with same 4h TTL.
+        Returns None if unavailable and cache is stale.
+        """
+        # Check cache first
+        cached = self._read_fgi_cache()
+        if cached is not None:
+            return cached
+
+        try:
+            resp = requests.get(
+                "https://api.alternative.me/fng/",
+                params={"limit": 1},
+                timeout=10,
+            )
+            data = resp.json().get("data", [])
+            if data:
+                fgi = int(data[0]["value"])
+                self._write_fgi_cache(fgi)
+                return fgi
+        except Exception as e:
+            logger.warning("Fear & Greed Index fetch failed: %s", e)
+
+        return None
+
+    def _read_fgi_cache(self) -> int | None:
+        """Read cached FGI. Returns None if missing or stale (>4h)."""
+        try:
+            with open(VOL_CACHE_FILE, "r") as f:
+                cache = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            return None
+
+        entry = cache.get(FGI_CACHE_KEY)
+        if entry is None:
+            return None
+
+        cached_time = datetime.fromisoformat(entry["timestamp"])
+        age = (datetime.now(timezone.utc) - cached_time).total_seconds()
+        if age > VOL_CACHE_MAX_AGE_SECONDS:
+            return None
+
+        return entry["value"]
+
+    def _write_fgi_cache(self, fgi: int) -> None:
+        """Write FGI to vol cache file."""
+        try:
+            with open(VOL_CACHE_FILE, "r") as f:
+                cache = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            cache = {}
+
+        cache[FGI_CACHE_KEY] = {
+            "value": fgi,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+
+        os.makedirs(os.path.dirname(VOL_CACHE_FILE), exist_ok=True)
+        with open(VOL_CACHE_FILE, "w") as f:
+            json.dump(cache, f, indent=2)
+
+    @staticmethod
+    def sentiment_to_drift(fgi: int) -> float:
+        """
+        Map Fear & Greed Index (0-100) to annualized drift.
+        Contrarian: extreme fear → positive drift (buying opportunity),
+        extreme greed → negative drift (elevated downside risk).
+
+        Returns drift capped at ±SENTIMENT_MAX_DRIFT.
+        """
+        max_drift = config.SENTIMENT_MAX_DRIFT
+        if fgi < 25:
+            return max_drift           # Extreme fear → bullish contrarian
+        elif fgi < 45:
+            return max_drift * 0.4     # Fear → mild bullish
+        elif fgi <= 55:
+            return 0.0                 # Neutral → no adjustment
+        elif fgi <= 75:
+            return -max_drift * 0.4    # Greed → mild bearish
+        else:
+            return -max_drift          # Extreme greed → bearish contrarian
+
     def _is_target_timeframe(self, market: dict) -> bool:
         """
         Filter for weekly and monthly contracts only.
@@ -203,22 +296,30 @@ class CryptoScreener:
         except Exception:
             return True
 
+    def _prob_above(self, spot: float, strike: float, vol: float,
+                    T: float, drift: float) -> float:
+        """P(S_T > strike) under log-normal diffusion with drift."""
+        from scipy.stats import norm
+        d2 = (math.log(spot / strike) + (drift - 0.5 * vol**2) * T) / (vol * math.sqrt(T))
+        return float(norm.cdf(d2))
+
     def _evaluate_market(self, market: dict, spot: float, vol: float,
-                         ticker: str) -> dict | None:
+                         ticker: str, fgi: int | None = None) -> dict | None:
         """
         Compare the market's implied probability to our model's estimate.
 
-        The model: simple log-normal diffusion (Black-Scholes-esque).
-        For a "Will BTC be above $X on date Y?" contract, the probability is:
-            P(S_T > K) = N(d2)
-        where d2 = (ln(S/K) + (mu - 0.5*sigma^2)*T) / (sigma * sqrt(T))
+        Handles three Kalshi contract types:
+        - strike_type='greater': P(S_T > strike) — above threshold
+        - strike_type='less':    P(S_T < strike) — below threshold
+        - strike_type='between': P(floor < S_T < cap) — bracket range
 
-        We assume mu ≈ 0 (no drift — conservative) so it's purely vol-driven.
+        The model uses log-normal diffusion (Black-Scholes-style):
+            P(S_T > K) = N(d2) where d2 = (ln(S/K) + (μ-0.5σ²)T) / (σ√T)
         """
-        # Parse strike price from market title or subtitle
-        strike = self._parse_strike(market)
-        if strike is None or strike <= 0:
-            return None
+        # Detect contract type from Kalshi API fields
+        strike_type = market.get("strike_type", "")
+        floor_strike = market.get("floor_strike")
+        cap_strike = market.get("cap_strike")
 
         # Time to expiry in years
         close_time_str = market.get("close_time", "")
@@ -229,11 +330,51 @@ class CryptoScreener:
         except Exception:
             return None
 
-        # Log-normal probability: P(S_T > K)
-        # d2 = (ln(S/K) - 0.5 * vol^2 * T) / (vol * sqrt(T))
-        from scipy.stats import norm
-        d2 = (math.log(spot / strike) - 0.5 * vol**2 * T) / (vol * math.sqrt(T))
-        model_prob = norm.cdf(d2)
+        # Compute drift from sentiment
+        drift = 0.0
+        if config.USE_SENTIMENT_SIGNALS and fgi is not None:
+            drift = self.sentiment_to_drift(fgi)
+
+        # Compute model probability based on contract type
+        strike_label = ""  # For rationale string
+        if strike_type == "between" and floor_strike is not None and cap_strike is not None:
+            # Bracket: P(floor < S_T < cap) = P(S_T > floor) - P(S_T > cap)
+            floor_val = float(floor_strike)
+            cap_val = float(cap_strike)
+            if floor_val <= 0 or cap_val <= 0 or cap_val <= floor_val:
+                return None
+            p_above_floor = self._prob_above(spot, floor_val, vol, T, drift)
+            p_above_cap = self._prob_above(spot, cap_val, vol, T, drift)
+            model_prob = max(p_above_floor - p_above_cap, 0.0)
+            strike_label = f"[${floor_val:,.0f}-${cap_val:,.0f}]"
+            strike_for_snap = floor_val
+
+        elif strike_type == "less" and cap_strike is not None:
+            # Below threshold: P(S_T < strike) = 1 - P(S_T > strike)
+            strike_val = float(cap_strike)
+            if strike_val <= 0:
+                return None
+            model_prob = 1.0 - self._prob_above(spot, strike_val, vol, T, drift)
+            strike_label = f"<${strike_val:,.0f}"
+            strike_for_snap = strike_val
+
+        elif strike_type == "greater" and floor_strike is not None:
+            # Above threshold: P(S_T > strike)
+            strike_val = float(floor_strike)
+            if strike_val <= 0:
+                return None
+            model_prob = self._prob_above(spot, strike_val, vol, T, drift)
+            strike_label = f">${strike_val:,.0f}"
+            strike_for_snap = strike_val
+
+        else:
+            # Fallback: try parsing from title (legacy behavior for older contracts)
+            strike = self._parse_strike(market)
+            if strike is None or strike <= 0:
+                return None
+            model_prob = self._prob_above(spot, strike, vol, T, drift)
+            strike_label = f">${strike:,.0f}"
+            strike_for_snap = strike
 
         # Get market price (as probability)
         market_prob = get_market_prob(market)
@@ -242,7 +383,7 @@ class CryptoScreener:
 
         # Determine side and edge
         edge_yes = model_prob - market_prob
-        edge_no = (1 - model_prob) - (1 - market_prob)  # Equivalent to market_prob - model_prob
+        edge_no = market_prob - model_prob
 
         # Snapshot base data (logged for both trade and skip)
         snap = {
@@ -250,8 +391,11 @@ class CryptoScreener:
             "ticker": market.get("ticker", ""),
             "asset": ticker,
             "spot": spot,
-            "strike": strike,
+            "strike": strike_for_snap,
+            "strike_type": strike_type or "unknown",
             "vol": round(vol, 4),
+            "drift": round(drift, 4),
+            "fgi": fgi,
             "days_to_expiry": round(T * 365.25, 1),
             "model_prob": round(model_prob, 4),
             "market_prob": round(market_prob, 4),
@@ -285,15 +429,20 @@ class CryptoScreener:
             "your_prob": round(your_prob, 4),
             "market_prob": round(market_prob, 4),
             "edge": round(edge, 4),
-            "strike": strike,
+            "strike": strike_for_snap,
+            "strike_type": strike_type or "unknown",
             "spot": spot,
             "vol": round(vol, 4),
             "days_to_expiry": round(T * 365.25, 1),
+            "fgi": fgi,
+            "drift": round(drift, 4),
             "rationale": (
-                f"Log-normal model: {ticker} spot=${spot:,.0f}, "
-                f"strike=${strike:,.0f}, vol={vol:.0%}, "
-                f"T={T*365.25:.1f}d → P(above)={model_prob:.1%} "
+                f"Log-normal: {ticker} spot=${spot:,.0f}, "
+                f"range={strike_label}, vol={vol:.0%}, "
+                f"drift={drift:+.1%}, "
+                f"T={T*365.25:.1f}d → P(YES)={model_prob:.1%} "
                 f"vs market {market_prob:.1%}"
+                + (f" [FGI={fgi}]" if fgi is not None else "")
             ),
         }
 

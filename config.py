@@ -48,6 +48,9 @@ MAX_BET_FRACTION = 0.0015    # Capped to keep positions <$500
 # Minimum edge (your_prob - market_prob) to consider a trade.
 # Below this threshold, transaction costs and model uncertainty eat the edge.
 MIN_EDGE_THRESHOLD = 0.05   # 5 percentage points
+MAX_EDGE_THRESHOLD = 0.50   # Reject edges above 50% — likely model error, not real edge
+# No market price floor/ceiling — cheap contracts can be real edges when
+# markets are stale (weather), emotional (crypto), or slow to update (econ)
 
 # ── Screener Settings ────────────────────────────────────────────────────────
 SCREENER_INTERVAL_MINUTES = 30   # How often to re-scan markets
@@ -77,7 +80,7 @@ FRED_API_KEY = os.environ.get("FRED_API_KEY", "")
 # Default to alert-only: send Telegram notifications but do not execute.
 ECON_ALERT_ONLY = False
 # If overridden to auto-trade, use a much smaller Kelly fraction.
-ECON_MAX_KELLY_FRACTION = 0.10  # vs 0.25 for crypto/weather
+ECON_MAX_KELLY_FRACTION = 0.15  # Bumped from 0.10: model-based edge (was heuristic)
 
 # ── Paper Trading ────────────────────────────────────────────────────────────
 # If True, orders are simulated locally — real market data, fake fills.
@@ -103,6 +106,17 @@ NO_OPP_ALERT_HOURS = 24
 DB_PATH = "data/kalshi.db"
 TRADES_FILE = "data/trades.json"            # Legacy (auto-migrated to SQLite)
 PERFORMANCE_FILE = "data/performance.csv"
+
+# ── Phase 5: Screener Enhancements ─────────────────────────────────────────
+# Crypto: Fear & Greed Index drift adjustment
+USE_SENTIMENT_SIGNALS = True
+SENTIMENT_MAX_DRIFT = 0.05        # Max annualized drift from sentiment (±5%)
+
+# Weather: Dynamic sigma from NWS gridpoint ensemble spread
+USE_DYNAMIC_SIGMA = True
+
+# Economics: Quantitative model settings
+ECON_MODEL_LOOKBACK = 24          # Months of FRED data for distribution fitting
 
 # ── Signal-Only Mode ────────────────────────────────────────────────────────
 # If True, screeners run and Telegram alerts fire, but no orders are placed.
