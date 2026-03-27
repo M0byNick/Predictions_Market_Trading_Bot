@@ -28,9 +28,14 @@ Screeners (30m interval)
 
 **Safety rails**:
 - `MIN_EDGE_THRESHOLD = 0.05` — no trade below 5% edge
+- `MAX_EDGE_THRESHOLD = 0.50` — reject edges above 50% (likely model error)
 - `MAX_BET_FRACTION = 0.0015` — caps position at ~$500 on $1M bankroll
+- Per-ticker position limit: $500 max across all open trades on same ticker
+- Paper balance enforcement: reject trades when balance < cost
 - Minimum position $5 — skip if sizing is trivially small
 - Economics uses reduced Kelly (0.15) — model-based edge (Phase 5, was 0.10 heuristic)
+- Weather tail dampening: power dampening on probabilities far from NWS forecast center
+- Weather market-informed blending: at ≤5¢ market price, blend model toward market
 
 **Kelly columns stored per trade** (added Tier 3):
 | Column | Description |
@@ -69,7 +74,7 @@ Every main loop cycle, `check_settlements()` runs after screening and trading:
 1. Query SQLite for all open trades (`outcome IS NULL`)
 2. Group by ticker to minimize API calls
 3. For each unique ticker, call `client.get_market(ticker)` to check status
-4. If `status == "settled"`, read the `result` field ("yes" or "no")
+4. If `status == "finalized"` or `status == "settled"`, read the `result` field ("yes" or "no")
 5. For each trade on that ticker:
    - Determine win/loss by comparing `trade.side` to market result
    - Call `tracker.record_outcome(id, outcome, settlement_price)` — updates outcome, pnl_usd, settlement_time
@@ -99,5 +104,10 @@ TOTAL_BANKROLL = 1,000,000
 MAX_BET_FRACTION = 0.0015     # ~$500 cap per position
 KELLY_FRACTION = 0.25         # Quarter-Kelly
 MIN_EDGE_THRESHOLD = 0.05     # 5% minimum edge
+MAX_EDGE_THRESHOLD = 0.50     # 50% max edge (overconfidence guardrail)
 SCREENER_INTERVAL_MINUTES = 30
+USE_SENTIMENT_SIGNALS = True  # Crypto FGI drift
+USE_DYNAMIC_SIGMA = True      # Weather dynamic sigma
+ECON_MODEL_LOOKBACK = 24      # Months of FRED data
+ECON_MAX_KELLY_FRACTION = 0.15
 ```

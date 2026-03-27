@@ -12,7 +12,7 @@ python main.py --summary     # Print performance summary + export CSV
 python backtest.py           # Validate screeners against settled markets
 python calibration.py        # Detailed calibration analysis (--export for CSV)
 streamlit run dashboard.py   # Launch Streamlit dashboard
-python -m pytest tests/      # Run unit tests (132 tests)
+python -m pytest tests/      # Run unit tests (152 tests)
 ```
 
 ## Project Structure
@@ -33,15 +33,15 @@ snapshots.py         # Market snapshot logger (SQLite backend)
 screeners/
   __init__.py        # Screener imports
   utils.py           # get_market_prob() — handles Kalshi API field formats
-  crypto.py          # Log-normal vol model vs Kalshi crypto brackets
-  weather.py         # NWS forecast vs Kalshi temp contracts
+  crypto.py          # Log-normal vol model + FGI sentiment drift, bracket/threshold handling
+  weather.py         # NWS forecast + dynamic sigma, tail dampening, bracket/less/greater handling
   economics.py       # FRED-based quantitative model on econ releases (Phase 5)
 tests/
   test_kelly.py            # Kelly sizing edge cases (21 tests)
   test_screener_parsing.py # Strike/threshold/date parsing + Phase 5 model tests (52 tests)
-  test_tracker.py          # Trade logging, metrics, pending orders, auto-settlement (29 tests)
+  test_tracker.py          # Trade logging, metrics, pending orders, auto-settlement, guardrails (37 tests)
   test_paper_client.py     # Paper order/settlement simulation (14 tests)
-  test_calibration.py      # Calibration analysis (16 tests)
+  test_calibration.py      # Calibration analysis + diagnostics (28 tests)
 data/
   kalshi.db          # SQLite database (trades, pending orders, snapshots, daily P&L)
   bot.log            # Rotating log file
@@ -62,7 +62,7 @@ See also:
 - Atomic writes for crash safety throughout
 - All market price reads go through `screeners.utils.get_market_prob()` for API compat
 
-## Current State (2026-03-23)
+## Current State (2026-03-26)
 - **Tier 1**: Secrets, logging, paper trading, backtesting
 - **Tier 2**: Crash recovery, market snapshots, unit tests, health alerts
 - **Tier 3**: SQLite migration, calibration analysis, Streamlit dashboard, mobile workflow, Kelly sizing columns
@@ -70,10 +70,21 @@ See also:
   - Crypto: Fear & Greed Index sentiment drift overlay (contrarian, ±5% max drift)
   - Weather: Dynamic sigma from NWS gridpoint temperature spread (static fallback)
   - Economics: Quantitative normal distribution model replacing heuristic flags
-- **Paper trading**: $1M bankroll, auto-execute all strategies, ~$500 max per position
-- **Auto-settlement**: Every cycle checks open trades against Kalshi API, settles wins/losses, updates P&L + paper balance
-- **132 unit tests passing**
-- **307+ paper trades logged** across weather, crypto, economics
-- **Pending**: Calibration comparison (Phase 5 models vs pre-Phase 5), live trading readiness
+- **Contract-type handling**: Bracket (`between`), less-than (`less`), greater-than (`greater`) correctly handled across all screeners — was the root cause of 87% of pre-fix losses
+- **Risk guardrails**:
+  - Max edge threshold (50%) — blocks implausible model claims
+  - Per-ticker position limit ($500) — prevents stacking across cycles
+  - Weather tail dampening — power dampening on far-from-forecast probabilities
+  - Weather market-informed blending — blends model toward market at ≤5¢
+  - Economics forward-month uncertainty — σ scales by √(months) for CPI/Fed rate
+  - Paper balance enforcement — rejects trades when balance < cost
+- **Enhanced calibration**: Expected vs realized edge, Brier by days-out, penny market split, phase comparison
+- **Auto-settlement**: Every cycle checks open trades against Kalshi API (`status == "finalized"`), settles wins/losses, updates P&L + paper balance
+- **Paper trading**: $1M bankroll (reset 2026-03-26), auto-execute all strategies, ~$500 max per position
+- **Dashboard**: Streamlit at localhost:8501, auto-refresh 30s, Phase 5+ only view (excludes pre-fix buggy trades)
+- **152 unit tests passing**
+- **109 Phase 5+ trades** (17 settled, 92 open), 1,750+ historical trades in DB
+- **Watchdog**: `watchdog.sh` auto-restarts bot on crash
+- **Pending**: Accumulate post-fix trade data for calibration evaluation, live trading readiness
 - **Remote**: git@github.com:M0byNick/Predictions_Market_Trading_Bot.git (private)
 - **Directory**: ~/Documents/2026/Professional/Trading/Prediction_Markets/

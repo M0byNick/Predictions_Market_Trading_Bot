@@ -56,7 +56,7 @@ Three screeners run every 30 minutes, each targeting a different Kalshi market c
 **Model**: Quantitative normal distribution (Phase 5, replaces heuristics)
 - CPI/NONFARM: fits N(μ, σ²) to month-over-month changes, P(next_change > threshold)
 - CPI_YOY/GDP/UNEMPLOYMENT: fits N(μ, σ²) to level distribution
-- FED_RATE: level-based with tight σ=0.20 (rates move in 25bp increments)
+- FED_RATE: level-based with σ=0.50×√(months_to_meeting), reflects rate cycle uncertainty
 - Heuristic flags (trend, cheap tail, near threshold) kept as rationale evidence only
 - Kelly fraction 0.15 (bumped from 0.10 — model-based edge warrants more confidence)
 
@@ -73,7 +73,8 @@ Three screeners run every 30 minutes, each targeting a different Kalshi market c
 - Normal distribution may not capture fat tails in economic data
 - No consensus estimate tracking yet (planned: Bloomberg/FRED survey data)
 - No BLS release schedule automation
-- Fed rate model is simplistic (fixed σ=0.20, no dot plot integration)
+- Fed rate σ scales with √(months) but no dot plot or futures curve integration
+- CPI forward months: σ grows by √(months_ahead) but no structural break detection
 
 ## Shared Utilities (`screeners/utils.py`)
 

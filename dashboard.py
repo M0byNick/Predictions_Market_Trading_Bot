@@ -71,6 +71,17 @@ if trades_df.empty:
     st.info("No trades recorded yet. Run the bot to start generating data.")
     st.stop()
 
+# ── Filter to Phase 5+ trades only ──────────────────────────────────
+# All fixes (contract types, guardrails, tail dampening, per-ticker limits)
+# went live 2026-03-26T04:39Z after paper account reset.
+# Pre-fix trades are kept in SQLite for historical reference but excluded here.
+PHASE5_CUTOFF = "2026-03-26T04:39:00+00:00"
+trades_df = trades_df[trades_df["entry_time"] >= PHASE5_CUTOFF]
+
+if trades_df.empty:
+    st.info("No Phase 5 trades yet. The bot will generate data as markets are screened.")
+    st.stop()
+
 # ── Summary Metrics ──────────────────────────────────────────────────
 
 settled = trades_df[trades_df["outcome"].notna()]
