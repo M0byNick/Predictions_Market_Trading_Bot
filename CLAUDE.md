@@ -62,7 +62,7 @@ See also:
 - Atomic writes for crash safety throughout
 - All market price reads go through `screeners.utils.get_market_prob()` for API compat
 
-## Current State (2026-03-27)
+## Current State (2026-04-01)
 - **Tier 1**: Secrets, logging, paper trading, backtesting
 - **Tier 2**: Crash recovery, market snapshots, unit tests, health alerts
 - **Tier 3**: SQLite migration, calibration analysis, Streamlit dashboard, mobile workflow, Kelly sizing columns
@@ -80,12 +80,12 @@ See also:
   - Paper balance enforcement — rejects trades when balance < cost
 - **Enhanced calibration**: Expected vs realized edge, Brier by days-out, penny market split, phase comparison
 - **Auto-settlement**: Every cycle checks open trades against Kalshi API (`status == "finalized"`), settles wins/losses, updates P&L + paper balance
-- **Paper trading**: $1M bankroll (reset 2026-03-26), balance $849,885, auto-execute all strategies, ~$500 max per position
+- **Paper trading**: $1M bankroll (reset 2026-03-26), balance $745,086, auto-execute all strategies, ~$500 max per position
 - **Dashboard**: Streamlit at localhost:8501, auto-refresh 30s, Phase 5+ only view (excludes pre-fix buggy trades)
-- **Bot running**: PID 39665 with watchdog auto-restart (`watchdog.sh`)
+- **Bot running**: with watchdog auto-restart (`watchdog.sh`)
+- **Telegram**: Bot token configured, chat ID = 862997381, command handler responds to /status /balance /dashboard /help
 - **152 unit tests passing**
-- **122 Phase 5+ trades** (23 settled, 99 open, 3 wins, P&L -$3,432), 1,870+ total trades in DB
-- **Telegram**: Bot token configured, chat ID = 862997381 (was incorrectly set to bot's own ID, fixed)
+- **122 Phase 5+ trades** (27 settled, 95 open, 4 wins, P&L +$439), 589 total trades in DB
 - **Hourly CLAUDE.md update**: Scheduled task runs every hour to keep docs current
 - **Pending**: Accumulate post-fix trade data for calibration evaluation, live trading readiness
 - **Remote**: git@github.com:M0byNick/Predictions_Market_Trading_Bot.git (private)
