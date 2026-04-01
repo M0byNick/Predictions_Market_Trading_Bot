@@ -3,7 +3,7 @@
   "configurations": [
     {
       "name": "dashboard",
-      "runtimeExecutable": "/opt/anaconda3/bin/streamlit",
+      "runtimeExecutable": "/Users/nmorihisa/opt/miniconda3/bin/streamlit",
       "runtimeArgs": ["run", "dashboard.py", "--server.port", "8501"],
       "port": 8501
     }

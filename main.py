@@ -492,9 +492,17 @@ def main_loop():
                     alerter.send_no_opportunity_alert(elapsed_h)
                     no_opp_alert_sent = True
 
-            # Sleep until next screening cycle
-            logger.info("Sleeping %d minutes...", config.SCREENER_INTERVAL_MINUTES)
-            time.sleep(config.SCREENER_INTERVAL_MINUTES * 60)
+            # Poll for Telegram commands during sleep
+            # Check every 10s so commands get a response within seconds
+            logger.info("Sleeping %d minutes (polling for Telegram commands)...",
+                         config.SCREENER_INTERVAL_MINUTES)
+            sleep_seconds = config.SCREENER_INTERVAL_MINUTES * 60
+            poll_interval = 10
+            slept = 0
+            while slept < sleep_seconds:
+                alerter.check_commands(tracker=tracker, client=client)
+                time.sleep(poll_interval)
+                slept += poll_interval
 
         except KeyboardInterrupt:
             logger.info("Bot stopped by user.")

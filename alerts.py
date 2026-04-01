@@ -278,6 +278,83 @@ class TelegramAlerter:
         except Exception:
             pass
 
+    def check_commands(self, tracker=None, client=None) -> None:
+        """
+        Poll for incoming Telegram messages and respond to commands.
+
+        Supported commands:
+          /status  — Current bot status, P&L, and dashboard link
+          /dashboard — Dashboard link
+          /balance — Paper trading balance
+          /help — List available commands
+        """
+        try:
+            resp = requests.get(
+                f"{self.base_url}/getUpdates",
+                params={"offset": self._last_update_id + 1, "timeout": 1},
+                timeout=10,
+            )
+            updates = resp.json().get("result", [])
+        except Exception as e:
+            logger.error("Telegram command poll error: %s", e)
+            return
+
+        dashboard_url = "http://localhost:8501"
+
+        for update in updates:
+            self._last_update_id = update["update_id"]
+
+            msg = update.get("message", {})
+            if str(msg.get("chat", {}).get("id")) != str(self.chat_id):
+                continue
+
+            text = (msg.get("text") or "").strip().lower()
+
+            if text == "/status":
+                lines = ["📊 <b>Bot Status</b>"]
+                if tracker:
+                    settled = tracker.conn.execute(
+                        "SELECT COUNT(*) FROM trades WHERE outcome IS NOT NULL"
+                    ).fetchone()[0]
+                    open_ct = tracker.conn.execute(
+                        "SELECT COUNT(*) FROM trades WHERE outcome IS NULL"
+                    ).fetchone()[0]
+                    pnl = tracker.total_pnl()
+                    hit = tracker.hit_rate()
+                    lines.append(f"P&L: <b>${pnl:+,.2f}</b>")
+                    lines.append(f"Hit rate: {hit:.1%}")
+                    lines.append(f"Trades: {settled + open_ct} ({settled} settled, {open_ct} open)")
+                if client:
+                    try:
+                        bal = client.get_balance().get("balance", 0) / 100
+                        lines.append(f"Balance: ${bal:,.2f}")
+                    except Exception:
+                        pass
+                lines.append(f"\n🖥 <a href=\"{dashboard_url}\">Dashboard</a>")
+                self.send("\n".join(lines))
+
+            elif text == "/dashboard":
+                self.send(f"🖥 <b>Dashboard:</b> <a href=\"{dashboard_url}\">{dashboard_url}</a>")
+
+            elif text == "/balance":
+                if client:
+                    try:
+                        bal = client.get_balance().get("balance", 0) / 100
+                        self.send(f"💰 <b>Paper balance:</b> ${bal:,.2f}")
+                    except Exception as e:
+                        self.send(f"⚠️ Could not fetch balance: {e}")
+                else:
+                    self.send("⚠️ No client available.")
+
+            elif text == "/help":
+                self.send(
+                    "🤖 <b>Available commands:</b>\n"
+                    "/status — Bot status, P&L, dashboard link\n"
+                    "/dashboard — Dashboard link\n"
+                    "/balance — Paper trading balance\n"
+                    "/help — This message"
+                )
+
     def get_chat_id(self):
         """
         Helper to discover your chat ID. Send any message to your bot
