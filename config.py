@@ -117,6 +117,11 @@ USE_DYNAMIC_SIGMA = True
 # Economics: Quantitative model settings
 ECON_MODEL_LOOKBACK = 24          # Months of FRED data for distribution fitting
 
+# ── Polymarket Edge Validation (read-only) ─────────────────────────────────
+ENABLE_POLYMARKET_VALIDATION = True
+POLYMARKET_API_BASE = "https://gamma-api.polymarket.com"
+POLYMARKET_CACHE_TTL_MINUTES = 10
+
 # ── Signal-Only Mode ────────────────────────────────────────────────────────
 # If True, screeners run and Telegram alerts fire, but no orders are placed.
 # You review opportunities on mobile and manually approve each one.

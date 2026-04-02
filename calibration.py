@@ -403,6 +403,57 @@ class CalibrationAnalyzer:
             }
         return result
 
+    def polymarket_comparison(self) -> dict | None:
+        """
+        Compare our model accuracy vs Polymarket's pricing for trades
+        where Polymarket data was captured in snapshots.
+
+        Returns dict with agreement stats, or None if no data.
+        """
+        import json
+
+        rows = self.conn.execute("""
+            SELECT data FROM market_snapshots
+            WHERE category = 'crypto' AND decision = 'trade'
+        """).fetchall()
+
+        with_pm = []
+        for r in rows:
+            try:
+                snap = json.loads(r["data"])
+                pm = snap.get("polymarket_prob")
+                if pm is not None and snap.get("model_prob") is not None:
+                    with_pm.append(snap)
+            except (json.JSONDecodeError, TypeError):
+                continue
+
+        if not with_pm:
+            return None
+
+        # Compute agreement stats
+        agree_count = 0
+        disagree_count = 0
+        total_spread = 0
+
+        for s in with_pm:
+            model = s["model_prob"]
+            pm = s["polymarket_prob"]
+            spread = abs(model - pm)
+            total_spread += spread
+
+            if spread < 0.10:
+                agree_count += 1
+            else:
+                disagree_count += 1
+
+        return {
+            "total": len(with_pm),
+            "agree": agree_count,
+            "disagree": disagree_count,
+            "agreement_rate": round(agree_count / len(with_pm), 4) if with_pm else 0,
+            "avg_spread": round(total_spread / len(with_pm), 4) if with_pm else 0,
+        }
+
     # ── Reports ─────────────────────────────────────────────────────────
 
     def full_report(self, category: Optional[str] = None) -> str:
@@ -513,6 +564,17 @@ class CalibrationAnalyzer:
                     f"Brier={data['brier']:.4f}, "
                     f"P&L=${data['pnl']:>10,.2f}"
                 )
+
+        # Polymarket cross-validation
+        pm = self.polymarket_comparison()
+        if pm and pm["total"] > 0:
+            lines.append(f"\n  {'─' * 50}")
+            lines.append(f"  Polymarket Cross-Validation (crypto only)")
+            lines.append(f"  {'─' * 50}")
+            lines.append(f"  Markets with PM data: {pm['total']}")
+            lines.append(f"  Agreement (<10pp spread): {pm['agree']} ({pm['agreement_rate']:.0%})")
+            lines.append(f"  Disagreement (≥10pp spread): {pm['disagree']}")
+            lines.append(f"  Avg model-PM spread: {pm['avg_spread']:.1%}")
 
         # Model version comparison
         mvc = self.model_version_comparison()

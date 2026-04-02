@@ -412,6 +412,7 @@ class WeatherScreener:
             "market_prob": round(market_prob, 4),
             "edge_yes": round(edge_yes, 4),
             "edge_no": round(edge_no, 4),
+            "polymarket_prob": None,  # No matching Polymarket weather markets
         }
 
         if edge_yes >= config.MIN_EDGE_THRESHOLD:

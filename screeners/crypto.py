@@ -26,6 +26,7 @@ import config
 from log import logger
 from screeners.utils import get_market_prob
 from snapshots import log_snapshot
+from polymarket_client import PolymarketClient
 
 VOL_CACHE_FILE = os.path.join("data", "vol_cache.json")
 VOL_CACHE_MAX_AGE_SECONDS = 4 * 3600  # 4 hours
@@ -57,6 +58,9 @@ class CryptoScreener:
         """
         opportunities = []
         self._cycle_id = cycle_id
+
+        # Initialize Polymarket validator for cross-market comparison
+        pm_client = PolymarketClient()
 
         # Fetch sentiment data once per screening cycle
         fgi = None
@@ -94,7 +98,7 @@ class CryptoScreener:
             markets = [m for m in markets if self._is_target_timeframe(m)]
 
             for market in markets:
-                opp = self._evaluate_market(market, spot, vol, ticker, fgi=fgi)
+                opp = self._evaluate_market(market, spot, vol, ticker, fgi=fgi, pm_client=pm_client)
                 if opp:
                     opportunities.append(opp)
 
@@ -304,7 +308,8 @@ class CryptoScreener:
         return float(norm.cdf(d2))
 
     def _evaluate_market(self, market: dict, spot: float, vol: float,
-                         ticker: str, fgi: int | None = None) -> dict | None:
+                         ticker: str, fgi: int | None = None,
+                         pm_client: PolymarketClient | None = None) -> dict | None:
         """
         Compare the market's implied probability to our model's estimate.
 
@@ -385,6 +390,12 @@ class CryptoScreener:
         edge_yes = model_prob - market_prob
         edge_no = market_prob - model_prob
 
+        # Polymarket cross-validation (read-only, data collection)
+        pm_prob = None
+        if pm_client:
+            expiry_str = market.get("close_time", "")[:10] if market.get("close_time") else None
+            pm_prob = pm_client.get_price("crypto", ticker, strike_for_snap, expiry_str, strike_type or "greater")
+
         # Snapshot base data (logged for both trade and skip)
         snap = {
             "screener": "crypto",
@@ -399,6 +410,7 @@ class CryptoScreener:
             "days_to_expiry": round(T * 365.25, 1),
             "model_prob": round(model_prob, 4),
             "market_prob": round(market_prob, 4),
+            "polymarket_prob": round(pm_prob, 4) if pm_prob is not None else None,
             "edge_yes": round(edge_yes, 4),
             "edge_no": round(edge_no, 4),
         }
@@ -436,6 +448,7 @@ class CryptoScreener:
             "days_to_expiry": round(T * 365.25, 1),
             "fgi": fgi,
             "drift": round(drift, 4),
+            "polymarket_prob": round(pm_prob, 4) if pm_prob is not None else None,
             "rationale": (
                 f"Log-normal: {ticker} spot=${spot:,.0f}, "
                 f"range={strike_label}, vol={vol:.0%}, "

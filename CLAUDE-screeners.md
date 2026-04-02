@@ -84,6 +84,21 @@ Three screeners run every 30 minutes, each targeting a different Kalshi market c
 
 All screeners must use this function — never read price fields directly.
 
+## Polymarket Edge Validation (`polymarket_client.py`)
+
+Read-only cross-market price comparison for crypto screener. Fetches prices from Polymarket's CLOB API to compare against our model probabilities. No trading, no auth.
+
+- **API**: CLOB at `https://clob.polymarket.com/markets` (free, public, paginated by creation date)
+- **Matching**: Searches for "Bitcoin above $X" / "between $X-$Y" markets by asset keyword + strike + expiry date
+- **Cache**: In-memory, 10-minute TTL
+- **Coverage**: Crypto only (BTC, ETH, SOL). Weather/econ markets don't exist on Polymarket in matching format.
+- **Output**: `polymarket_prob` field in snapshot dict. Not used for trade decisions yet — data collection for calibration analysis.
+
+**Known limitations**:
+- CLOB API requires paginating through 750K+ markets to reach current daily contracts
+- Polymarket crypto markets are mostly intraday (5-min Up/Down) — "above $X at 5PM ET" markets are better matches but less common
+- No Fed rate, CPI, or weather markets on Polymarket in Kalshi-compatible format
+
 ## Snapshot Logging
 
-Every market evaluated (trade or skip) is logged to SQLite `market_snapshots` table via `snapshots.py`. Fields include: ticker, category, decision, model probability, market probability, edge. Grouped by `cycle_id` for per-screening-cycle analysis.
+Every market evaluated (trade or skip) is logged to SQLite `market_snapshots` table via `snapshots.py`. Fields include: ticker, category, decision, model probability, market probability, Polymarket probability, edge. Grouped by `cycle_id` for per-screening-cycle analysis.

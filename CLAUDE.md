@@ -1,5 +1,8 @@
 # Predictions Market Trading Bot
 
+## Security
+- **NO AXIOS**: Do NOT use Axios or `npm install axios` in any JavaScript code. Major external security vulnerability. Use native `fetch` API instead.
+
 Automated screener and paper-trading system for Kalshi prediction markets. Targets three categories: crypto price brackets, weather (daily high temps), and economic data releases (CPI, Fed rate). NY/NJ compliant (CFTC-regulated, non-sports markets only).
 
 ## Quick Start
@@ -25,7 +28,8 @@ kalshi_client.py     # Kalshi REST API with RSA-PSS auth
 paper_client.py      # Simulated order fills (extends KalshiClient)
 kelly.py             # Kelly criterion position sizing
 tracker.py           # Trade journal, P&L, Brier score (SQLite backend)
-alerts.py            # Telegram notifications + inline buttons + daily digest
+alerts.py            # Telegram notifications + inline buttons + daily digest + command handler
+polymarket_client.py # Read-only Polymarket Gamma/CLOB API for edge validation
 backtest.py          # Screener validation against settled markets
 calibration.py       # Calibration analysis (Brier, edge decay, bias detection)
 dashboard.py         # Streamlit dashboard (bankroll curve, calibration, P&L)
@@ -78,13 +82,14 @@ See also:
   - Weather market-informed blending — blends model toward market at ≤5¢
   - Economics forward-month uncertainty — σ scales by √(months) for CPI/Fed rate
   - Paper balance enforcement — rejects trades when balance < cost
-- **Enhanced calibration**: Expected vs realized edge, Brier by days-out, penny market split, phase comparison
+- **Enhanced calibration**: Expected vs realized edge, Brier by days-out, penny market split, phase comparison, Polymarket cross-validation
+- **Polymarket validation**: Read-only price comparison via Gamma/CLOB API for crypto markets — logs `polymarket_prob` in snapshots for post-hoc calibration analysis
 - **Auto-settlement**: Every cycle checks open trades against Kalshi API (`status == "finalized"`), settles wins/losses, updates P&L + paper balance
 - **Paper trading**: $1M bankroll (reset 2026-03-26), balance $745,086, auto-execute all strategies, ~$500 max per position
 - **Dashboard**: Streamlit at localhost:8501, auto-refresh 30s, Phase 5+ only view (excludes pre-fix buggy trades)
 - **Bot running**: with watchdog auto-restart (`watchdog.sh`)
 - **Telegram**: Bot token configured, chat ID = 862997381, command handler responds to /status /balance /dashboard /help
-- **152 unit tests passing**
+- **168 unit tests passing**
 - **122 Phase 5+ trades** (27 settled, 95 open, 4 wins, P&L +$439), 589 total trades in DB
 - **Hourly CLAUDE.md update**: Scheduled task runs every hour to keep docs current
 - **Pending**: Accumulate post-fix trade data for calibration evaluation, live trading readiness

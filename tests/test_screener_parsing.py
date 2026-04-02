@@ -677,3 +677,129 @@ class TestEconHeuristicFlags:
         hist = {"latest": {"value": 4.0}, "trend": "stable", "min_6m": 3.5, "max_6m": 4.5}
         flags = self.screener._heuristic_flags(hist, 5.0, 0.50)
         assert flags == []
+
+
+# ── Phase 5: Polymarket Client Tests ─────────────────────────────────────────
+
+class TestPolymarketParseQuestion:
+    """Tests for PolymarketClient._parse_question."""
+
+    @pytest.fixture(autouse=True)
+    def _make_client(self):
+        from polymarket_client import PolymarketClient
+        self.client = PolymarketClient()
+
+    def test_above_with_dollar_comma(self):
+        result = self.client._parse_question("bitcoin above 69,800 on april 1, 5pm et?")
+        assert result is not None
+        assert result["strike_type"] == "greater"
+        assert result["strike"] == 69800
+
+    def test_above_with_dollar_sign(self):
+        result = self.client._parse_question("will the price of bitcoin be above $110,000 on october 20?")
+        assert result is not None
+        assert result["strike_type"] == "greater"
+        assert result["strike"] == 110000
+
+    def test_between_with_k_suffix(self):
+        result = self.client._parse_question("will the price of bitcoin be between $104k and $105k at 5 pm et today?")
+        assert result is not None
+        assert result["strike_type"] == "between"
+
+    def test_less_than(self):
+        result = self.client._parse_question("will the price of bitcoin be less than $93000 on feb 28?")
+        assert result is not None
+        assert result["strike_type"] == "less"
+        assert result["strike"] == 93000
+
+    def test_up_or_down_no_match(self):
+        """Up/Down markets shouldn't parse as price level markets."""
+        result = self.client._parse_question("bitcoin up or down - april 2, 2:05pm-2:10pm et")
+        assert result is None
+
+    def test_no_price_no_match(self):
+        result = self.client._parse_question("will bitcoin hit $1m before gta vi?")
+        # This should parse (has a dollar amount), but $1m is unusual
+        # The important thing is it doesn't crash
+        assert result is None or result["strike_type"] in ("greater", "less", "between")
+
+
+class TestPolymarketMatchMarket:
+    """Tests for PolymarketClient._match_market."""
+
+    @pytest.fixture(autouse=True)
+    def _make_client(self):
+        from polymarket_client import PolymarketClient
+        self.client = PolymarketClient()
+        # Pre-populate cache with test data
+        self.client._cache["BTC"] = [
+            {"question": "Bitcoin above $70,000?", "price": 0.65,
+             "end_date": "2026-04-03", "strike": 70000, "strike_type": "greater",
+             "condition_id": "abc123"},
+            {"question": "Bitcoin above $80,000?", "price": 0.25,
+             "end_date": "2026-04-03", "strike": 80000, "strike_type": "greater",
+             "condition_id": "def456"},
+            {"question": "Bitcoin between $68K-$70K?", "price": 0.15,
+             "end_date": "2026-04-03", "strike": 68000, "strike_type": "between",
+             "condition_id": "ghi789"},
+        ]
+
+    def test_exact_strike_match(self):
+        result = self.client._match_market("BTC", 70000, "2026-04-03", "greater")
+        assert result == 0.65
+
+    def test_close_strike_match(self):
+        """Within 5% of strike should match."""
+        result = self.client._match_market("BTC", 69000, "2026-04-03", "greater")
+        assert result == 0.65  # 69K is within 5% of 70K
+
+    def test_no_match_wrong_type(self):
+        result = self.client._match_market("BTC", 70000, "2026-04-03", "less")
+        assert result is None
+
+    def test_no_match_wrong_date(self):
+        result = self.client._match_market("BTC", 70000, "2026-04-05", "greater")
+        assert result is None
+
+    def test_no_match_strike_too_far(self):
+        result = self.client._match_market("BTC", 50000, "2026-04-03", "greater")
+        assert result is None  # 50K is >5% from 70K or 80K
+
+    def test_empty_cache_returns_none(self):
+        result = self.client._match_market("ETH", 2000, "2026-04-03", "greater")
+        assert result is None
+
+
+class TestPolymarketGetPrice:
+    """Tests for PolymarketClient.get_price high-level API."""
+
+    @pytest.fixture(autouse=True)
+    def _patch_config(self, monkeypatch):
+        import config
+        monkeypatch.setattr(config, "ENABLE_POLYMARKET_VALIDATION", True)
+        monkeypatch.setattr(config, "POLYMARKET_CACHE_TTL_MINUTES", 10)
+
+    @pytest.fixture(autouse=True)
+    def _make_client(self):
+        from polymarket_client import PolymarketClient
+        self.client = PolymarketClient()
+
+    def test_weather_returns_none(self):
+        """Weather has no Polymarket matches."""
+        result = self.client.get_price("weather", "NYC", 72.0, "2026-04-03")
+        assert result is None
+
+    def test_economics_returns_none(self):
+        """Economics has no Polymarket matches."""
+        result = self.client.get_price("economics", "CPI", 0.5, "2026-04-03")
+        assert result is None
+
+    def test_disabled_returns_none(self, monkeypatch):
+        import config
+        monkeypatch.setattr(config, "ENABLE_POLYMARKET_VALIDATION", False)
+        result = self.client.get_price("crypto", "BTC", 70000, "2026-04-03")
+        assert result is None
+
+    def test_unknown_asset_returns_none(self):
+        result = self.client.get_price("crypto", "DOGE", 0.5, "2026-04-03")
+        assert result is None

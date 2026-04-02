@@ -321,6 +321,7 @@ class EconomicsScreener:
             "market_prob": round(market_prob, 4),
             "model_prob": round(model_prob, 4) if model_prob is not None else None,
             "model_std": round(model_std, 4) if model_std is not None else None,
+            "polymarket_prob": None,  # No matching Polymarket econ markets
             "flags": flags,
             "trend": historical.get("trend", "unknown") if historical else "no_data",
             "latest_value": historical["latest"]["value"] if historical else None,
