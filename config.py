@@ -49,8 +49,7 @@ MAX_BET_FRACTION = 0.0015    # Capped to keep positions <$500
 # Below this threshold, transaction costs and model uncertainty eat the edge.
 MIN_EDGE_THRESHOLD = 0.05   # 5 percentage points
 MAX_EDGE_THRESHOLD = 0.50   # Reject edges above 50% — likely model error, not real edge
-# No market price floor/ceiling — cheap contracts can be real edges when
-# markets are stale (weather), emotional (crypto), or slow to update (econ)
+MIN_MARKET_PRICE = 0.05     # Skip penny markets (≤5¢) — 0/25 win rate in Phase 5+ data
 
 # ── Screener Settings ────────────────────────────────────────────────────────
 SCREENER_INTERVAL_MINUTES = 30   # How often to re-scan markets

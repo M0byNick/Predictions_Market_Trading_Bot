@@ -91,6 +91,14 @@ def process_opportunity(opp: dict, alerter: TelegramAlerter,
                      opp['ticker'], edge * 100, config.MAX_EDGE_THRESHOLD * 100)
         return False
 
+    # ── Penny market filter ───────────────────────────────────────────
+    # 0/25 win rate on ≤5¢ markets in Phase 5+ data. Cut until we have
+    # a model that can reliably price tail outcomes.
+    if market_prob <= config.MIN_MARKET_PRICE:
+        logger.info("GUARDRAIL: Skip %s — market price %.0f¢ below %.0f¢ floor",
+                     opp['ticker'], market_prob * 100, config.MIN_MARKET_PRICE * 100)
+        return False
+
     # ── Per-ticker position limit ─────────────────────────────────────
     # Prevent stacking: only allow one open position per ticker.
     # Without this, the bot adds ~$500 every 30min cycle on the same contract.
