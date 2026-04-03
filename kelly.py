@@ -81,23 +81,39 @@ def kelly_size(your_prob: float, market_prob: float,
     # Safety cap: never risk more than MAX_BET_FRACTION of category bankroll
     capped_fraction = min(fractional_kelly, config.MAX_BET_FRACTION)
 
-    # Convert to dollars. Each YES contract costs `market_prob * 100` cents.
-    # The bankroll fraction tells us total dollars to allocate.
-    dollars_to_risk = capped_fraction * category_bankroll
+    # Convert to dollars and contracts.
+    # Each YES contract costs market_prob dollars (e.g., 0.62 = 62 cents).
+    # Compute max contracts from bankroll fraction, then verify cost stays within cap.
+    cost_per_contract = market_prob  # in dollar terms
+    if cost_per_contract <= 0:
+        return {
+            "action": "no_trade",
+            "reason": "Invalid contract price",
+            "edge": edge,
+            "kelly_fraction": 0,
+            "recommended_contracts": 0,
+            "recommended_usd": 0,
+        }
 
-    # Each contract costs market_prob dollars (since prices are in cents, 1-99)
-    cost_per_contract = market_prob  # in dollar terms (e.g., 0.62 = 62 cents)
-    num_contracts = int(dollars_to_risk / cost_per_contract) if cost_per_contract > 0 else 0
+    dollars_to_risk = capped_fraction * category_bankroll
+    num_contracts = int(dollars_to_risk / cost_per_contract)
+
+    # Verify actual cost is within cap AFTER rounding down to whole contracts.
+    # This prevents rounding from producing a cost that exceeds the budget.
+    actual_cost = num_contracts * cost_per_contract
+    if actual_cost > dollars_to_risk:
+        num_contracts -= 1
+        actual_cost = num_contracts * cost_per_contract
 
     # Don't place trades for less than $5 — not worth the attention
-    if num_contracts * cost_per_contract < 5.0:
+    if actual_cost < 5.0:
         return {
             "action": "skip",
             "reason": "Position size too small (< $5) to be worth executing",
             "edge": edge,
             "kelly_fraction": capped_fraction,
             "recommended_contracts": num_contracts,
-            "recommended_usd": round(num_contracts * cost_per_contract, 2),
+            "recommended_usd": round(actual_cost, 2),
         }
 
     return {
@@ -110,7 +126,7 @@ def kelly_size(your_prob: float, market_prob: float,
         "fractional_kelly": round(fractional_kelly, 4),
         "capped_fraction": round(capped_fraction, 4),
         "recommended_contracts": num_contracts,
-        "recommended_usd": round(num_contracts * cost_per_contract, 2),
+        "recommended_usd": round(actual_cost, 2),
         "category_bankroll": round(category_bankroll, 2),
         "expected_value": round(num_contracts * edge, 2),
     }
