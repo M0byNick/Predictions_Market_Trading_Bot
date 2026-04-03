@@ -85,18 +85,58 @@ def init_db(db_path: str) -> sqlite3.Connection:
             UNIQUE(date, category)
         );
 
+        CREATE TABLE IF NOT EXISTS price_checks (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            trade_id        INTEGER NOT NULL,
+            ticker          TEXT NOT NULL,
+            check_time      TEXT NOT NULL,
+            current_price   REAL NOT NULL,
+            entry_price     REAL NOT NULL,
+            price_move      REAL NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS skipped_opportunities (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            ticker          TEXT NOT NULL,
+            category        TEXT NOT NULL,
+            side            TEXT NOT NULL,
+            your_prob       REAL,
+            market_prob     REAL,
+            edge            REAL,
+            skip_reason     TEXT NOT NULL,
+            skip_time       TEXT NOT NULL,
+            eventual_result TEXT,
+            settlement_time TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS weather_actuals (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            date            TEXT NOT NULL,
+            city            TEXT NOT NULL,
+            actual_high_f   REAL,
+            forecast_high_f REAL,
+            forecast_std    REAL,
+            sigma_source    TEXT,
+            error_f         REAL,
+            UNIQUE(date, city)
+        );
+
         CREATE INDEX IF NOT EXISTS idx_trades_category ON trades(category);
         CREATE INDEX IF NOT EXISTS idx_trades_outcome ON trades(outcome);
         CREATE INDEX IF NOT EXISTS idx_trades_entry_time ON trades(entry_time);
         CREATE INDEX IF NOT EXISTS idx_pending_ticker_side ON pending_orders(ticker, side);
         CREATE INDEX IF NOT EXISTS idx_snapshots_cycle ON market_snapshots(cycle_id);
         CREATE INDEX IF NOT EXISTS idx_daily_pnl_date ON daily_pnl(date);
+        CREATE INDEX IF NOT EXISTS idx_price_checks_trade ON price_checks(trade_id);
+        CREATE INDEX IF NOT EXISTS idx_skipped_ticker ON skipped_opportunities(ticker);
+        CREATE INDEX IF NOT EXISTS idx_weather_actuals_date ON weather_actuals(date, city);
     """)
 
     conn.commit()
 
     # Schema migrations for existing databases
     _migrate_kelly_columns(conn)
+    _migrate_entry_timing_columns(conn)
 
     logger.info("Database initialized at %s", db_path)
     return conn
@@ -112,6 +152,22 @@ def _migrate_kelly_columns(conn: sqlite3.Connection) -> None:
         ("fractional_kelly", "REAL"),
         ("kelly_rec_usd", "REAL"),
         ("kelly_multiplier", "REAL"),
+    ]
+    for col_name, col_type in new_cols:
+        if col_name not in existing_cols:
+            conn.execute(f"ALTER TABLE trades ADD COLUMN {col_name} {col_type}")
+    conn.commit()
+
+
+def _migrate_entry_timing_columns(conn: sqlite3.Connection) -> None:
+    """Add entry timing columns to trades table if they don't exist."""
+    cursor = conn.execute("PRAGMA table_info(trades)")
+    existing_cols = {row[1] for row in cursor.fetchall()}
+
+    new_cols = [
+        ("entry_hour", "INTEGER"),
+        ("entry_vol", "REAL"),
+        ("entry_fgi", "INTEGER"),
     ]
     for col_name, col_type in new_cols:
         if col_name not in existing_cols:

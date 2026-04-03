@@ -82,7 +82,9 @@ class Tracker:
                   kelly_fraction: float, notes: str = "",
                   full_kelly: float = None, fractional_kelly: float = None,
                   kelly_rec_usd: float = None,
-                  kelly_multiplier: float = None) -> dict:
+                  kelly_multiplier: float = None,
+                  entry_hour: int = None, entry_vol: float = None,
+                  entry_fgi: int = None) -> dict:
         """
         Log a new trade at entry time. The outcome will be recorded
         later when the contract settles.
@@ -101,12 +103,12 @@ class Tracker:
             INSERT INTO trades (ticker, category, side, your_prob, market_prob,
                 edge_at_entry, num_contracts, cost_usd, kelly_fraction,
                 full_kelly, fractional_kelly, kelly_rec_usd, kelly_multiplier,
-                entry_time, notes)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                entry_time, notes, entry_hour, entry_vol, entry_fgi)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (ticker, category, side, your_prob, market_prob, edge,
               num_contracts, cost_usd, kelly_fraction,
               full_kelly, fractional_kelly, kelly_rec_usd, kelly_multiplier,
-              entry_time, notes))
+              entry_time, notes, entry_hour, entry_vol, entry_fgi))
         self.conn.commit()
 
         trade_id = cursor.lastrowid
@@ -187,6 +189,45 @@ class Tracker:
                 loss_count = loss_count + excluded.loss_count
         """, (date_str, category, pnl, win_inc, loss_inc))
         self.conn.commit()
+
+    # ── Price Tracking ────────────────────────────────────────────────────
+
+    def log_price_check(self, trade_id: int, ticker: str,
+                        current_price: float, entry_price: float) -> None:
+        """Log a price check for an open position."""
+        self.conn.execute("""
+            INSERT INTO price_checks (trade_id, ticker, check_time,
+                current_price, entry_price, price_move)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (trade_id, ticker,
+              datetime.now(timezone.utc).isoformat(),
+              current_price, entry_price,
+              round(current_price - entry_price, 4)))
+        self.conn.commit()
+
+    # ── Skipped Opportunity Logging ──────────────────────────────────────
+
+    def log_skipped(self, ticker: str, category: str, side: str,
+                    your_prob: float, market_prob: float, edge: float,
+                    skip_reason: str) -> None:
+        """Log a trade that was skipped by a guardrail."""
+        self.conn.execute("""
+            INSERT INTO skipped_opportunities (ticker, category, side,
+                your_prob, market_prob, edge, skip_reason, skip_time)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, (ticker, category, side, your_prob, market_prob, edge,
+              skip_reason, datetime.now(timezone.utc).isoformat()))
+        self.conn.commit()
+
+    def backfill_skipped_settlements(self, ticker: str, result: str) -> int:
+        """Update skipped opportunities with the eventual settlement result."""
+        cursor = self.conn.execute("""
+            UPDATE skipped_opportunities
+            SET eventual_result = ?, settlement_time = ?
+            WHERE ticker = ? AND eventual_result IS NULL
+        """, (result, datetime.now(timezone.utc).isoformat(), ticker))
+        self.conn.commit()
+        return cursor.rowcount
 
     # ── Performance Metrics ──────────────────────────────────────────────
 

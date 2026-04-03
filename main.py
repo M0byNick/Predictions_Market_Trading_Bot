@@ -89,22 +89,24 @@ def process_opportunity(opp: dict, alerter: TelegramAlerter,
     if edge > config.MAX_EDGE_THRESHOLD:
         logger.info("GUARDRAIL: Skip %s — edge %.1f%% exceeds max %.0f%%",
                      opp['ticker'], edge * 100, config.MAX_EDGE_THRESHOLD * 100)
+        tracker.log_skipped(opp['ticker'], category, side,
+                            opp.get('your_prob', 0), market_prob, edge, "edge_cap")
         return False
 
     # ── Penny market filter ───────────────────────────────────────────
-    # 0/25 win rate on ≤5¢ markets in Phase 5+ data. Cut until we have
-    # a model that can reliably price tail outcomes.
     if market_prob <= config.MIN_MARKET_PRICE:
         logger.info("GUARDRAIL: Skip %s — market price %.0f¢ below %.0f¢ floor",
                      opp['ticker'], market_prob * 100, config.MIN_MARKET_PRICE * 100)
+        tracker.log_skipped(opp['ticker'], category, side,
+                            opp.get('your_prob', 0), market_prob, edge, "penny_floor")
         return False
 
     # ── Per-ticker position limit ─────────────────────────────────────
-    # Prevent stacking: only allow one open position per ticker.
-    # Without this, the bot adds ~$500 every 30min cycle on the same contract.
     existing = tracker.get_open_positions_for_ticker(opp["ticker"])
     if existing > 0:
         logger.debug("Skip %s — already have %d open position(s)", opp['ticker'], existing)
+        tracker.log_skipped(opp['ticker'], category, side,
+                            opp.get('your_prob', 0), market_prob, edge, "per_ticker_limit")
         return False
 
     cat_bankroll = category_bankroll(category)
@@ -121,9 +123,11 @@ def process_opportunity(opp: dict, alerter: TelegramAlerter,
         kelly_override=kelly_ovr,
     )
 
-    # If Kelly says no trade, skip silently
+    # If Kelly says no trade, skip
     if sizing["action"] in ("no_trade", "skip"):
         logger.debug("Skip %s: %s", opp['ticker'], sizing['reason'])
+        tracker.log_skipped(opp['ticker'], category, side,
+                            opp.get('your_prob', 0), market_prob, edge, "kelly_no_trade")
         return False
 
     # Signal-only mode: alert but do not execute anything
@@ -246,7 +250,11 @@ def process_opportunity(opp: dict, alerter: TelegramAlerter,
         kelly_rec_usd_val = round(frac_kelly_val * sizing.get("category_bankroll", 0), 2)
         kelly_mult = round(actual_cost / kelly_rec_usd_val, 4) if kelly_rec_usd_val > 0 else 0
 
-        # Log the trade with actual filled quantities
+        # Log the trade with actual filled quantities + entry timing
+        entry_hour = datetime.now(timezone.utc).hour
+        entry_vol = opp.get("vol") or opp.get("entry_vol")
+        entry_fgi = opp.get("fgi") or opp.get("entry_fgi")
+
         tracker.log_trade(
             ticker=opp["ticker"],
             category=category,
@@ -261,6 +269,9 @@ def process_opportunity(opp: dict, alerter: TelegramAlerter,
             kelly_rec_usd=kelly_rec_usd_val,
             kelly_multiplier=kelly_mult,
             notes=opp.get("rationale", ""),
+            entry_hour=entry_hour,
+            entry_vol=entry_vol,
+            entry_fgi=entry_fgi,
         )
 
         # Trade is tracked — remove from pending orders
@@ -280,6 +291,104 @@ def process_opportunity(opp: dict, alerter: TelegramAlerter,
         alerter.send(f"❌ Order failed for {opp['ticker']}: {e}")
         tracker.clear_pending(opp["ticker"], opp["side"])
         return False
+
+
+def check_open_prices(tracker: Tracker, client: KalshiClient) -> None:
+    """
+    Re-price all open positions to track post-entry market movement.
+    Runs once per cycle. Stores price deltas in price_checks table.
+    """
+    from screeners.utils import get_market_prob
+
+    rows = tracker.conn.execute(
+        "SELECT id, ticker, market_prob FROM trades WHERE outcome IS NULL"
+    ).fetchall()
+
+    if not rows:
+        return
+
+    # Group by ticker to minimize API calls
+    ticker_trades = {}
+    for r in rows:
+        ticker_trades.setdefault(r["ticker"], []).append(dict(r))
+
+    checked = 0
+    for ticker, trades in ticker_trades.items():
+        try:
+            market_data = client.get_market(ticker)
+            market = market_data.get("market", market_data)
+            current_price = get_market_prob(market)
+            if current_price is None or current_price <= 0:
+                continue
+
+            for trade in trades:
+                tracker.log_price_check(
+                    trade["id"], ticker, current_price, trade["market_prob"]
+                )
+                checked += 1
+        except Exception:
+            continue
+
+    if checked:
+        logger.info("Price check: tracked %d open positions", checked)
+
+
+def _log_weather_actual(tracker: Tracker, ticker: str, trade: dict) -> None:
+    """Log actual vs forecast weather data when a weather trade settles."""
+    from screeners.weather import WeatherScreener
+    import json
+
+    # Determine city from ticker (e.g., KXHIGHCHI-26MAR24-B52.5 → CHI)
+    city = None
+    for c in ["NYC", "CHI", "MIA", "AUS"]:
+        city_code = {"NYC": "NY", "CHI": "CHI", "MIA": "MIA", "AUS": "AUS"}[c]
+        if city_code in ticker.upper():
+            city = c
+            break
+
+    if not city:
+        return
+
+    actual = WeatherScreener.get_actual_temp(city)
+    if actual is None:
+        return
+
+    # Try to find the forecast from snapshots
+    snap_row = tracker.conn.execute("""
+        SELECT data FROM market_snapshots
+        WHERE ticker = ? AND category = 'weather'
+        ORDER BY timestamp DESC LIMIT 1
+    """, (ticker,)).fetchone()
+
+    forecast_high = None
+    forecast_std = None
+    sigma_source = None
+    if snap_row:
+        try:
+            snap = json.loads(snap_row["data"])
+            forecast_high = snap.get("forecast_high")
+            forecast_std = snap.get("forecast_std")
+            sigma_source = snap.get("sigma_source")
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+    error = round(actual - forecast_high, 1) if forecast_high is not None else None
+    date_str = ticker.split("-")[1][:7] if "-" in ticker else ""
+
+    try:
+        tracker.conn.execute("""
+            INSERT OR IGNORE INTO weather_actuals
+                (date, city, actual_high_f, forecast_high_f, forecast_std,
+                 sigma_source, error_f)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (date_str, city, actual, forecast_high, forecast_std,
+              sigma_source, error))
+        tracker.conn.commit()
+        if error is not None:
+            logger.info("Weather actual: %s %s forecast=%.0f°F actual=%.0f°F error=%+.1f°F",
+                        city, date_str, forecast_high, actual, error)
+    except Exception as e:
+        logger.warning("Failed to log weather actual: %s", e)
 
 
 def check_settlements(tracker: Tracker, client: KalshiClient,
@@ -330,6 +439,13 @@ def check_settlements(tracker: Tracker, client: KalshiClient,
                     continue
 
             settlement_price = 1.0 if result == "yes" else 0.0
+
+            # Backfill skipped opportunities with this ticker's result
+            tracker.backfill_skipped_settlements(ticker, result)
+
+            # Log actual weather data for weather contracts
+            if trades and trades[0].get("category") == "weather":
+                _log_weather_actual(tracker, ticker, trades[0])
 
             for trade in trades:
                 won = (trade["side"] == result)
@@ -458,6 +574,9 @@ def main_loop():
                 settled = check_settlements(tracker, client, alerter)
                 if settled:
                     logger.info("Settlement check: %d trade(s) resolved", settled)
+
+                # Post-entry price tracking on remaining open positions
+                check_open_prices(tracker, client)
             except Exception as e:
                 logger.warning("Settlement check error: %s", e)
 

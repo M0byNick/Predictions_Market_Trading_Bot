@@ -403,6 +403,119 @@ class CalibrationAnalyzer:
             }
         return result
 
+    def missed_wins_analysis(self) -> dict | None:
+        """Analyze skipped opportunities to find missed wins by guardrail."""
+        rows = self.conn.execute("""
+            SELECT skip_reason, side, eventual_result,
+                   your_prob, market_prob, edge, category
+            FROM skipped_opportunities
+            WHERE eventual_result IS NOT NULL
+        """).fetchall()
+
+        if not rows:
+            return None
+
+        by_reason = defaultdict(lambda: {"total": 0, "missed_wins": 0, "categories": defaultdict(int)})
+        for r in rows:
+            reason = r["skip_reason"]
+            by_reason[reason]["total"] += 1
+            # A missed win: we skipped, and our side was correct
+            if r["side"] == r["eventual_result"]:
+                by_reason[reason]["missed_wins"] += 1
+                by_reason[reason]["categories"][r["category"]] += 1
+
+        return dict(by_reason)
+
+    def price_movement_analysis(self) -> dict | None:
+        """Analyze post-entry price movement on settled trades."""
+        rows = self.conn.execute("""
+            SELECT t.id, t.side, t.market_prob, t.outcome,
+                   AVG(pc.price_move) as avg_move,
+                   COUNT(pc.id) as check_count
+            FROM trades t
+            JOIN price_checks pc ON pc.trade_id = t.id
+            WHERE t.outcome IS NOT NULL
+            GROUP BY t.id
+        """).fetchall()
+
+        if not rows:
+            return None
+
+        wins = [r for r in rows if r["outcome"] == "win"]
+        losses = [r for r in rows if r["outcome"] == "loss"]
+
+        return {
+            "total_tracked": len(rows),
+            "wins": {
+                "count": len(wins),
+                "avg_price_move": round(sum(r["avg_move"] for r in wins) / len(wins), 4) if wins else 0,
+            },
+            "losses": {
+                "count": len(losses),
+                "avg_price_move": round(sum(r["avg_move"] for r in losses) / len(losses), 4) if losses else 0,
+            },
+        }
+
+    def weather_forecast_accuracy(self) -> dict | None:
+        """Analyze NWS forecast accuracy from weather_actuals table."""
+        rows = self.conn.execute("""
+            SELECT city, actual_high_f, forecast_high_f, forecast_std,
+                   sigma_source, error_f
+            FROM weather_actuals
+            WHERE actual_high_f IS NOT NULL AND forecast_high_f IS NOT NULL
+        """).fetchall()
+
+        if not rows:
+            return None
+
+        errors = [abs(r["error_f"]) for r in rows if r["error_f"] is not None]
+        by_city = defaultdict(list)
+        for r in rows:
+            if r["error_f"] is not None:
+                by_city[r["city"]].append(r["error_f"])
+
+        return {
+            "total": len(rows),
+            "avg_abs_error": round(sum(errors) / len(errors), 1) if errors else 0,
+            "max_error": round(max(errors), 1) if errors else 0,
+            "by_city": {
+                city: {
+                    "count": len(errs),
+                    "avg_abs_error": round(sum(abs(e) for e in errs) / len(errs), 1),
+                    "bias": round(sum(errs) / len(errs), 1),
+                }
+                for city, errs in by_city.items()
+            },
+        }
+
+    def entry_timing_analysis(self) -> dict | None:
+        """Analyze crypto win rate by time of day and market conditions."""
+        rows = self.conn.execute("""
+            SELECT entry_hour, entry_vol, entry_fgi, outcome
+            FROM trades
+            WHERE outcome IS NOT NULL AND category = 'crypto'
+            AND entry_hour IS NOT NULL
+        """).fetchall()
+
+        if not rows:
+            return None
+
+        # Group by 6-hour buckets
+        buckets = {"00-05 UTC": (0, 5), "06-11 UTC": (6, 11),
+                   "12-17 UTC": (12, 17), "18-23 UTC": (18, 23)}
+        result = {}
+        for label, (lo, hi) in buckets.items():
+            bucket_trades = [r for r in rows if lo <= (r["entry_hour"] or 0) <= hi]
+            if bucket_trades:
+                wins = sum(1 for t in bucket_trades if t["outcome"] == "win")
+                result[label] = {
+                    "count": len(bucket_trades),
+                    "wins": wins,
+                    "hit_rate": round(wins / len(bucket_trades), 3),
+                }
+
+        return result if result else None
+
     def polymarket_comparison(self) -> dict | None:
         """
         Compare our model accuracy vs Polymarket's pricing for trades
@@ -592,6 +705,61 @@ class CalibrationAnalyzer:
                     f"Brier={data['brier']:.4f}, "
                     f"bias={data['bias']:+.4f}, "
                     f"P&L=${data['pnl']:>10,.2f}"
+                )
+
+        # Post-entry price movement
+        pm_move = self.price_movement_analysis()
+        if pm_move and pm_move["total_tracked"] > 0:
+            lines.append(f"\n  {'─' * 50}")
+            lines.append(f"  Post-Entry Price Movement")
+            lines.append(f"  {'─' * 50}")
+            lines.append(f"  Tracked: {pm_move['total_tracked']} trades")
+            w = pm_move["wins"]
+            l = pm_move["losses"]
+            if w["count"]:
+                lines.append(f"  Winners avg price move: {w['avg_price_move']:+.1%} (market moved toward model)")
+            if l["count"]:
+                lines.append(f"  Losers avg price move:  {l['avg_price_move']:+.1%}")
+
+        # Missed wins
+        missed = self.missed_wins_analysis()
+        if missed:
+            lines.append(f"\n  {'─' * 50}")
+            lines.append(f"  Missed Wins by Guardrail")
+            lines.append(f"  {'─' * 50}")
+            lines.append(f"  {'Guardrail':<20s} {'Skipped':>7s} {'Missed':>7s} {'Rate':>7s}")
+            for reason, data in sorted(missed.items()):
+                rate = data["missed_wins"] / data["total"] if data["total"] else 0
+                lines.append(
+                    f"  {reason:<20s} {data['total']:>7d} {data['missed_wins']:>7d} {rate:>6.0%}"
+                )
+
+        # Weather forecast accuracy
+        wfa = self.weather_forecast_accuracy()
+        if wfa and wfa["total"] > 0:
+            lines.append(f"\n  {'─' * 50}")
+            lines.append(f"  NWS Forecast Accuracy")
+            lines.append(f"  {'─' * 50}")
+            lines.append(f"  Observations: {wfa['total']}")
+            lines.append(f"  Avg |error|: {wfa['avg_abs_error']}°F")
+            lines.append(f"  Max |error|: {wfa['max_error']}°F")
+            for city, data in sorted(wfa["by_city"].items()):
+                lines.append(
+                    f"    {city}: {data['count']} obs, "
+                    f"|err|={data['avg_abs_error']}°F, "
+                    f"bias={data['bias']:+.1f}°F"
+                )
+
+        # Entry timing (crypto)
+        timing = self.entry_timing_analysis()
+        if timing:
+            lines.append(f"\n  {'─' * 50}")
+            lines.append(f"  Crypto Entry Timing (by hour UTC)")
+            lines.append(f"  {'─' * 50}")
+            lines.append(f"  {'Time Bucket':<12s} {'Trades':>6s} {'Wins':>5s} {'Hit%':>7s}")
+            for bucket, data in timing.items():
+                lines.append(
+                    f"  {bucket:<12s} {data['count']:>6d} {data['wins']:>5d} {data['hit_rate']:>6.0%}"
                 )
 
         lines.append(f"\n{'═' * 60}\n")

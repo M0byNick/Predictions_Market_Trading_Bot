@@ -255,6 +255,45 @@ class WeatherScreener:
         sigma = max(spread / 3.29, 1.5)
         return round(sigma, 2)
 
+    @staticmethod
+    def get_actual_temp(city: str) -> float | None:
+        """
+        Fetch the latest observed temperature from NWS station observations.
+        Returns the max temperature in Fahrenheit, or None on failure.
+
+        Uses the station codes defined in CITY_COORDS.
+        Endpoint: https://api.weather.gov/stations/{STATION}/observations/latest
+        """
+        station = WeatherScreener.CITY_COORDS.get(city, {}).get("station")
+        if not station:
+            return None
+
+        try:
+            resp = requests.get(
+                f"{config.NWS_API_BASE}/stations/{station}/observations/latest",
+                headers={"User-Agent": "KalshiBot/1.0 (weather-research)"},
+                timeout=10,
+            )
+            data = resp.json()
+            props = data.get("properties", {})
+
+            # maxTemperatureLast24Hours is the daily high
+            max_temp = props.get("maxTemperatureLast24Hours", {})
+            value = max_temp.get("value")
+            if value is not None:
+                return round(value * 9.0 / 5.0 + 32.0, 1)
+
+            # Fallback to current temperature
+            temp = props.get("temperature", {})
+            value = temp.get("value")
+            if value is not None:
+                return round(value * 9.0 / 5.0 + 32.0, 1)
+
+        except Exception as e:
+            logger.warning("NWS actual temp fetch failed for %s: %s", city, e)
+
+        return None
+
     def _evaluate_market(self, market: dict, forecast: list, city: str,
                          gridpoint_data: dict | None = None) -> dict | None:
         """
