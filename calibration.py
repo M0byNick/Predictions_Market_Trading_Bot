@@ -403,6 +403,71 @@ class CalibrationAnalyzer:
             }
         return result
 
+    def _check_decision_triggers(self) -> list:
+        """Check if any strategy adjustment triggers have fired."""
+        triggers = []
+        BREAKEVEN = 0.141  # With 6.5x win/loss ratio
+
+        # Trigger 1: Raise MIN_EDGE from 5% to 10%
+        low_edge = self.conn.execute("""
+            SELECT COUNT(*) as cnt,
+                   SUM(CASE WHEN outcome='win' THEN 1 ELSE 0 END) as wins
+            FROM trades WHERE outcome IS NOT NULL
+            AND entry_time >= '2026-03-26T04:39:00'
+            AND edge_at_entry >= 0.05 AND edge_at_entry < 0.10
+        """).fetchone()
+        if low_edge["cnt"] >= 25:
+            hr = low_edge["wins"] / low_edge["cnt"]
+            if hr < BREAKEVEN:
+                triggers.append(
+                    f"RAISE MIN_EDGE to 10%: 5-10% bucket has {low_edge['cnt']} trades, "
+                    f"{hr:.0%} hit rate (below {BREAKEVEN:.0%} breakeven)"
+                )
+
+        # Trigger 2: Re-enable penny markets if missed wins > 20%
+        penny_missed = self.conn.execute("""
+            SELECT COUNT(*) as total,
+                   SUM(CASE WHEN side = eventual_result THEN 1 ELSE 0 END) as missed
+            FROM skipped_opportunities
+            WHERE skip_reason = 'penny_floor' AND eventual_result IS NOT NULL
+        """).fetchone()
+        if penny_missed["total"] >= 20:
+            rate = (penny_missed["missed"] or 0) / penny_missed["total"]
+            if rate > 0.20:
+                triggers.append(
+                    f"RE-ENABLE PENNY MARKETS: {rate:.0%} of penny skips would have won "
+                    f"({penny_missed['missed']}/{penny_missed['total']})"
+                )
+
+        # Trigger 3: Edge cap too aggressive
+        edge_cap_missed = self.conn.execute("""
+            SELECT COUNT(*) as total,
+                   SUM(CASE WHEN side = eventual_result THEN 1 ELSE 0 END) as missed
+            FROM skipped_opportunities
+            WHERE skip_reason = 'edge_cap' AND eventual_result IS NOT NULL
+        """).fetchone()
+        if edge_cap_missed["total"] >= 15:
+            rate = (edge_cap_missed["missed"] or 0) / edge_cap_missed["total"]
+            if rate > 0.25:
+                triggers.append(
+                    f"LOWER MAX_EDGE: {rate:.0%} of edge-cap skips would have won "
+                    f"({edge_cap_missed['missed']}/{edge_cap_missed['total']})"
+                )
+
+        # Trigger 4: Weather forecast error too high
+        weather_err = self.conn.execute("""
+            SELECT AVG(ABS(error_f)) as mae, COUNT(*) as cnt
+            FROM weather_actuals
+            WHERE error_f IS NOT NULL
+        """).fetchone()
+        if weather_err["cnt"] >= 15 and weather_err["mae"] and weather_err["mae"] > 4.0:
+            triggers.append(
+                f"TIGHTEN WEATHER σ: NWS avg |error| = {weather_err['mae']:.1f}°F "
+                f"(exceeds 4°F threshold, {weather_err['cnt']} observations)"
+            )
+
+        return triggers
+
     def missed_wins_analysis(self) -> dict | None:
         """Analyze skipped opportunities to find missed wins by guardrail."""
         rows = self.conn.execute("""
@@ -706,6 +771,15 @@ class CalibrationAnalyzer:
                     f"bias={data['bias']:+.4f}, "
                     f"P&L=${data['pnl']:>10,.2f}"
                 )
+
+        # Strategy decision triggers
+        triggers = self._check_decision_triggers()
+        if triggers:
+            lines.append(f"\n  {'─' * 50}")
+            lines.append(f"  ⚡ STRATEGY DECISION TRIGGERS")
+            lines.append(f"  {'─' * 50}")
+            for t in triggers:
+                lines.append(f"  → {t}")
 
         # Post-entry price movement
         pm_move = self.price_movement_analysis()
