@@ -15,7 +15,7 @@ python main.py --summary     # Print performance summary + export CSV
 python backtest.py           # Validate screeners against settled markets
 python calibration.py        # Detailed calibration analysis (--export for CSV)
 streamlit run dashboard.py   # Launch Streamlit dashboard
-python -m pytest tests/      # Run unit tests (152 tests)
+python -m pytest tests/      # Run unit tests (168 tests)
 ```
 
 ## Project Structure
@@ -47,7 +47,8 @@ tests/
   test_paper_client.py     # Paper order/settlement simulation (14 tests)
   test_calibration.py      # Calibration analysis + diagnostics (28 tests)
 data/
-  kalshi.db          # SQLite database (trades, pending orders, snapshots, daily P&L)
+  kalshi.db          # SQLite database (trades, pending orders, snapshots, daily P&L,
+                     #   price_checks, skipped_opportunities, weather_actuals)
   bot.log            # Rotating log file
 ```
 
@@ -66,7 +67,7 @@ See also:
 - Atomic writes for crash safety throughout
 - All market price reads go through `screeners.utils.get_market_prob()` for API compat
 
-## Current State (2026-04-01)
+## Current State (2026-04-04)
 - **Tier 1**: Secrets, logging, paper trading, backtesting
 - **Tier 2**: Crash recovery, market snapshots, unit tests, health alerts
 - **Tier 3**: SQLite migration, calibration analysis, Streamlit dashboard, mobile workflow, Kelly sizing columns
@@ -82,15 +83,23 @@ See also:
   - Weather market-informed blending — blends model toward market at ≤5¢
   - Economics forward-month uncertainty — σ scales by √(months) for CPI/Fed rate
   - Paper balance enforcement — rejects trades when balance < cost
+  - Penny market floor (≤5¢) — 0/29 win rate, cut until tail models improve
+  - Kelly post-rounding verification — actual_cost checked within budget after int() truncation
 - **Enhanced calibration**: Expected vs realized edge, Brier by days-out, penny market split, phase comparison, Polymarket cross-validation
 - **Polymarket validation**: Read-only price comparison via Gamma/CLOB API for crypto markets — logs `polymarket_prob` in snapshots for post-hoc calibration analysis
+- **Analytics tracking** (added 2026-04-03):
+  - Post-entry price tracking — re-prices open positions each cycle, stores in `price_checks` table
+  - Missed-win tracking — logs guardrail-skipped trades in `skipped_opportunities`, backfills settlement results
+  - NWS actual temperature logging — stores forecast vs observed temps in `weather_actuals` on settlement
+  - Entry timing analysis — captures `entry_hour`, `entry_vol`, `entry_fgi` per trade for time-of-day patterns
+  - Automated decision triggers — calibration report flags when data supports strategy changes
 - **Auto-settlement**: Every cycle checks open trades against Kalshi API (`status == "finalized"`), settles wins/losses, updates P&L + paper balance
-- **Paper trading**: $1M bankroll (reset 2026-03-26), balance $745,086, auto-execute all strategies, ~$500 max per position
+- **Paper trading**: $1M bankroll (reset 2026-03-26), balance $730,278, auto-execute all strategies, ~$500 max per position
 - **Dashboard**: Streamlit at localhost:8501, auto-refresh 30s, Phase 5+ only view (excludes pre-fix buggy trades)
 - **Bot running**: with watchdog auto-restart (`watchdog.sh`)
 - **Telegram**: Bot token configured, chat ID = 862997381, command handler responds to /status /balance /dashboard /help
 - **168 unit tests passing**
-- **122 Phase 5+ trades** (27 settled, 95 open, 4 wins, P&L +$439), 589 total trades in DB
+- **198 Phase 5+ trades** (95 settled, 103 open, 12 wins, P&L -$3,000), 665 total trades in DB
 - **Hourly CLAUDE.md update**: Scheduled task runs every hour to keep docs current
 - **Pending**: Accumulate post-fix trade data for calibration evaluation, live trading readiness
 - **Remote**: git@github.com:M0byNick/Predictions_Market_Trading_Bot.git (private)

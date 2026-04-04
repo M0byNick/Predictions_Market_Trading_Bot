@@ -40,8 +40,23 @@ WAL mode enabled for concurrent reads (dashboard, calibration) while bot writes.
 - date, category, realized_pnl, trade_count, win_count, loss_count
 - UNIQUE(date, category) with ON CONFLICT upsert
 
+**`price_checks`** — Post-entry market price tracking (added 2026-04-03)
+- trade_id, ticker, check_time, current_price, entry_price, price_move
+- One row per open trade per screening cycle
+
+**`skipped_opportunities`** — Missed-win tracking (added 2026-04-03)
+- ticker, category, side, your_prob, market_prob, edge, skip_reason, skip_time
+- eventual_result, settlement_time — backfilled when ticker settles
+- skip_reason: `edge_cap`, `penny_floor`, `per_ticker_limit`, `kelly_no_trade`, `balance`
+
+**`weather_actuals`** — NWS forecast accuracy (added 2026-04-03)
+- date, city, actual_high_f, forecast_high_f, forecast_std, sigma_source, error_f
+- UNIQUE(date, city) — one observation per city per day
+- Populated on weather trade settlement via NWS station observations API
+
 ### Schema Migrations
 - `_migrate_kelly_columns()`: Adds full_kelly, fractional_kelly, kelly_rec_usd, kelly_multiplier via ALTER TABLE if missing
+- `_migrate_entry_timing_columns()`: Adds entry_hour, entry_vol, entry_fgi to trades table
 - Legacy JSON migration: `migrate_json_trades()`, `migrate_json_pending()`, `migrate_jsonl_snapshots()` — run once on first init
 
 ## Calibration System (`calibration.py`)
