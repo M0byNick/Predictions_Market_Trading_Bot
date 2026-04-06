@@ -67,7 +67,7 @@ See also:
 - Atomic writes for crash safety throughout
 - All market price reads go through `screeners.utils.get_market_prob()` for API compat
 
-## Current State (2026-04-04)
+## Current State (2026-04-05)
 - **Tier 1**: Secrets, logging, paper trading, backtesting
 - **Tier 2**: Crash recovery, market snapshots, unit tests, health alerts
 - **Tier 3**: SQLite migration, calibration analysis, Streamlit dashboard, mobile workflow, Kelly sizing columns
@@ -99,7 +99,8 @@ See also:
 - **Bot running**: with watchdog auto-restart (`watchdog.sh`)
 - **Telegram**: Bot token configured, chat ID = 862997381, command handler responds to /status /balance /dashboard /help
 - **168 unit tests passing**
-- **198 Phase 5+ trades** (95 settled, 103 open, 12 wins, P&L -$3,000), 665 total trades in DB
+- **223 Phase 5+ trades** (119 settled, 104 open, 18 wins, P&L -$1,421), 690 total trades in DB
+- **P&L source of truth**: DB Phase 5+ trades only. Paper account balance is inflated by ghost positions from pre-fix cleanup — ignore paper balance, trust DB realized P&L.
 - **Hourly CLAUDE.md update**: Scheduled task runs every hour to keep docs current
 - **Pending**: Accumulate post-fix trade data for calibration evaluation, live trading readiness
 - **Remote**: git@github.com:M0byNick/Predictions_Market_Trading_Bot.git (private)
