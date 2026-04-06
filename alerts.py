@@ -311,25 +311,26 @@ class TelegramAlerter:
             text = (msg.get("text") or "").strip().lower()
 
             if text == "/status":
-                lines = ["📊 <b>Bot Status</b>"]
+                # Phase 5+ only — DB is sole P&L source of truth
+                CUTOFF = "2026-03-26T04:39:00"
+                lines = ["📊 <b>Bot Status (Phase 5+)</b>"]
                 if tracker:
                     settled = tracker.conn.execute(
-                        "SELECT COUNT(*) FROM trades WHERE outcome IS NOT NULL"
+                        f"SELECT COUNT(*) FROM trades WHERE outcome IS NOT NULL AND entry_time >= '{CUTOFF}'"
                     ).fetchone()[0]
                     open_ct = tracker.conn.execute(
-                        "SELECT COUNT(*) FROM trades WHERE outcome IS NULL"
+                        f"SELECT COUNT(*) FROM trades WHERE outcome IS NULL AND entry_time >= '{CUTOFF}'"
                     ).fetchone()[0]
-                    pnl = tracker.total_pnl()
-                    hit = tracker.hit_rate()
+                    wins = tracker.conn.execute(
+                        f"SELECT COUNT(*) FROM trades WHERE outcome = 'win' AND entry_time >= '{CUTOFF}'"
+                    ).fetchone()[0]
+                    pnl = tracker.conn.execute(
+                        f"SELECT COALESCE(SUM(pnl_usd), 0) FROM trades WHERE outcome IS NOT NULL AND entry_time >= '{CUTOFF}'"
+                    ).fetchone()[0]
+                    hit = wins / settled if settled else 0
                     lines.append(f"P&L: <b>${pnl:+,.2f}</b>")
-                    lines.append(f"Hit rate: {hit:.1%}")
+                    lines.append(f"Hit rate: {hit:.1%} ({wins}W / {settled - wins}L)")
                     lines.append(f"Trades: {settled + open_ct} ({settled} settled, {open_ct} open)")
-                if client:
-                    try:
-                        bal = client.get_balance().get("balance", 0) / 100
-                        lines.append(f"Balance: ${bal:,.2f}")
-                    except Exception:
-                        pass
                 lines.append(f"\n🖥 <a href=\"{dashboard_url}\">Dashboard</a>")
                 self.send("\n".join(lines))
 
@@ -337,14 +338,23 @@ class TelegramAlerter:
                 self.send(f"🖥 <b>Dashboard:</b> <a href=\"{dashboard_url}\">{dashboard_url}</a>")
 
             elif text == "/balance":
-                if client:
-                    try:
-                        bal = client.get_balance().get("balance", 0) / 100
-                        self.send(f"💰 <b>Paper balance:</b> ${bal:,.2f}")
-                    except Exception as e:
-                        self.send(f"⚠️ Could not fetch balance: {e}")
+                CUTOFF = "2026-03-26T04:39:00"
+                if tracker:
+                    pnl = tracker.conn.execute(
+                        f"SELECT COALESCE(SUM(pnl_usd), 0) FROM trades WHERE outcome IS NOT NULL AND entry_time >= '{CUTOFF}'"
+                    ).fetchone()[0]
+                    open_cost = tracker.conn.execute(
+                        f"SELECT COALESCE(SUM(cost_usd), 0) FROM trades WHERE outcome IS NULL AND entry_time >= '{CUTOFF}'"
+                    ).fetchone()[0]
+                    self.send(
+                        f"💰 <b>Phase 5+ Balance</b>\n"
+                        f"Bankroll: $1,000,000\n"
+                        f"Realized P&L: ${pnl:+,.2f}\n"
+                        f"Open exposure: ${open_cost:,.2f}\n"
+                        f"Net: ${1_000_000 + pnl - open_cost:,.2f}"
+                    )
                 else:
-                    self.send("⚠️ No client available.")
+                    self.send("⚠️ No tracker available.")
 
             elif text == "/help":
                 self.send(
