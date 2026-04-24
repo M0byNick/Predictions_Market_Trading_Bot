@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Rejected candidates</h1>
+<table>
+  <thead>
+    <tr><th>Cand ID</th><th>Kalshi</th><th>Poly US</th><th>Sim</th><th>Reason</th><th>When</th></tr>
+  </thead>
+  <tbody>
+  {% for r in rows %}
+    <tr>
+      <td>{{ r.candidate_id }}</td>
+      <td>{{ r.kalshi_title or r.kalshi_ticker }}</td>
+      <td>{{ r.poly_title or r.poly_us_market_id }}</td>
+      <td>{{ "%.3f" % r.cosine_similarity }}</td>
+      <td>{{ r.reason }}</td>
+      <td class="muted">{{ r.rejected_ts }}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

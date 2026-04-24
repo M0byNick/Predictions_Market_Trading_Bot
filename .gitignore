@@ -1,0 +1,11 @@
+.env
+data/
+secrets/
+__pycache__/
+*.pyc
+.venv/
+.ruff_cache/
+.pytest_cache/
+*.sqlite
+*.sqlite-journal
+*.db

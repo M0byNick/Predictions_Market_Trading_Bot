@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>{{ row.venue }} / <code>{{ row.venue_market_id }}</code></h1>
+<div class="card">
+  <div class="kv">
+    <dt>Title</dt><dd>{{ row.title }}</dd>
+    <dt>Description</dt><dd>{{ row.description or '—' }}</dd>
+    <dt>Resolution criteria</dt><dd>{{ row.resolution_criteria or '—' }}</dd>
+    <dt>Resolution source</dt><dd>{{ row.resolution_source or '—' }}</dd>
+    <dt>Close time (unix)</dt><dd>{{ row.close_time }}</dd>
+    <dt>Status</dt><dd>{{ row.status }}</dd>
+    <dt>YES bid/ask</dt><dd>{{ row.yes_bid }} / {{ row.yes_ask }}</dd>
+    <dt>NO bid/ask</dt><dd>{{ row.no_bid }} / {{ row.no_ask }}</dd>
+    <dt>Volume / liquidity</dt><dd>{{ row.volume }} / {{ row.liquidity }}</dd>
+  </div>
+</div>
+<div class="card">
+  <h3>Raw venue response</h3>
+  <pre>{{ raw }}</pre>
+</div>
+{% endblock %}

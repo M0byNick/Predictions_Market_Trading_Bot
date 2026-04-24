@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Arb_Bot Dashboard</title>
+  <style>
+    :root { --ok:#1f7a1f; --warn:#b77900; --bad:#a83232; --bg:#fafafa; --fg:#222; --muted:#666; --card:#fff; --line:#ddd; }
+    * { box-sizing: border-box; }
+    body { margin:0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background:var(--bg); color:var(--fg); }
+    nav { background:#222; color:#fff; padding: 12px 20px; display:flex; gap:18px; align-items:center; }
+    nav a { color:#ddd; text-decoration:none; }
+    nav a:hover { color:#fff; }
+    nav .brand { font-weight:700; color:#fff; margin-right:12px; }
+    main { max-width: 1200px; margin: 20px auto; padding: 0 20px; }
+    .card { background:var(--card); border:1px solid var(--line); border-radius:6px; padding:16px; margin-bottom:16px; }
+    .row { display:grid; grid-template-columns: 1fr 1fr; gap:16px; }
+    @media (max-width: 800px) { .row { grid-template-columns: 1fr; } }
+    h1,h2,h3 { margin-top:0; }
+    .muted { color:var(--muted); }
+    .pill { display:inline-block; padding:2px 8px; border-radius:10px; font-size:12px; font-weight:600; }
+    .pill-clean { background:#dff3df; color:var(--ok); }
+    .pill-high { background:#fde3e3; color:var(--bad); }
+    .pill-med  { background:#fdeccf; color:var(--warn); }
+    .pill-none { background:#e6eef9; color:#2a4a82; }
+    .pill-amb  { background:#eee; color:var(--muted); }
+    table { width:100%; border-collapse: collapse; }
+    th, td { text-align:left; padding:8px; border-bottom:1px solid var(--line); font-size:14px; }
+    th { background:#f3f3f3; }
+    form.inline { display:inline; }
+    button, input[type=submit] { background:#222; color:#fff; border:0; padding:8px 14px; border-radius:4px; cursor:pointer; font-size:14px; }
+    button.reject { background:#a83232; }
+    button.skip { background:#888; }
+    input[type=text], textarea, select { width:100%; padding:6px; border:1px solid var(--line); border-radius:4px; font-family:inherit; }
+    .flash { padding:10px 14px; margin-bottom:12px; border-radius:4px; }
+    .flash.success { background:#dff3df; color:var(--ok); }
+    .flash.warning { background:#fdeccf; color:var(--warn); }
+    .kv { display:grid; grid-template-columns: 180px 1fr; gap:4px 12px; font-size:14px; }
+    .kv dt { color:var(--muted); }
+    pre { background:#f3f3f3; padding:10px; border-radius:4px; overflow:auto; font-size:12px; }
+  </style>
+</head>
+<body>
+  <nav>
+    <span class="brand">Arb_Bot</span>
+    <a href="{{ url_for('index') }}">Overview</a>
+    <a href="{{ url_for('queue') }}">Queue</a>
+    <a href="{{ url_for('approved_list') }}">Approved</a>
+    <a href="{{ url_for('rejected_list') }}">Rejected</a>
+  </nav>
+  <main>
+    {% with messages = get_flashed_messages(with_categories=true) %}
+      {% for cat, msg in messages %}
+        <div class="flash {{ cat }}">{{ msg }}</div>
+      {% endfor %}
+    {% endwith %}
+    {% block content %}{% endblock %}
+  </main>
+</body>
+</html>

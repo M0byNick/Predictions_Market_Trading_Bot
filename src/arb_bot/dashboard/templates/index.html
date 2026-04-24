@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Overview</h1>
+<div class="row">
+  <div class="card">
+    <h3>Ingested markets (open)</h3>
+    <div class="kv">
+      <dt>Kalshi</dt><dd>{{ counts.markets_kalshi }}</dd>
+      <dt>Polymarket US</dt><dd>{{ counts.markets_poly_us }}</dd>
+    </div>
+  </div>
+  <div class="card">
+    <h3>Pair pipeline</h3>
+    <div class="kv">
+      <dt>Candidates (embedding)</dt><dd>{{ counts.candidates_total }}</dd>
+      <dt>LLM verdicts written</dt><dd>{{ counts.verdicts_total }}</dd>
+      <dt>Pending human review</dt><dd><strong>{{ counts.pending }}</strong></dd>
+      <dt>Approved</dt><dd>{{ counts.approved_total }} <span class="muted">({{ counts.approved_clean }} clean / {{ counts.approved_high_risk }} high-risk)</span></dd>
+      <dt>Rejected</dt><dd>{{ counts.rejected_total }}</dd>
+    </div>
+  </div>
+</div>
+<div class="card">
+  <p><a href="{{ url_for('queue') }}">→ Go to approval queue</a></p>
+  <p class="muted">Mode: paper v1. No live orders will be placed.</p>
+</div>
+{% endblock %}

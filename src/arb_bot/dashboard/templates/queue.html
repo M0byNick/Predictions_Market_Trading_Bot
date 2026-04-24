@@ -1,0 +1,67 @@
+{% extends "base.html" %}
+{% macro risk_pill(level) %}
+  {% if level == 'high' %}<span class="pill pill-high">HIGH RISK</span>
+  {% elif level == 'medium' %}<span class="pill pill-med">MEDIUM</span>
+  {% elif level == 'low' %}<span class="pill pill-med">LOW</span>
+  {% elif level == 'none' %}<span class="pill pill-none">CLEAN</span>
+  {% else %}<span class="pill pill-amb">{{ level }}</span>{% endif %}
+{% endmacro %}
+{% block content %}
+<h1>Approval queue</h1>
+<div class="card">
+  <h3>LLM verdict</h3>
+  <div class="kv">
+    <dt>Match</dt><dd><strong>{{ pair.match }}</strong> (confidence {{ "%.0f" % (pair.confidence * 100) }}%)</dd>
+    <dt>Resolution aligned</dt><dd>{{ pair.resolution_aligned }}</dd>
+    <dt>Divergence risk</dt><dd>{{ risk_pill(pair.resolution_divergence_risk) }}</dd>
+    {% if pair.divergence_reason %}<dt>Divergence reason</dt><dd>{{ pair.divergence_reason }}</dd>{% endif %}
+    <dt>Normalized</dt><dd>{{ pair.normalized_question }}</dd>
+    <dt>Reasoning</dt><dd>{{ pair.reasoning }}</dd>
+    <dt>Cosine sim</dt><dd>{{ "%.3f" % pair.cosine_similarity }}</dd>
+  </div>
+</div>
+
+<div class="row">
+  <div class="card">
+    <h3>Kalshi: <code>{{ pair.kalshi_ticker }}</code></h3>
+    <div class="kv">
+      <dt>Title</dt><dd>{{ kal.title }}</dd>
+      <dt>Description</dt><dd>{{ kal.description or '—' }}</dd>
+      <dt>Rules</dt><dd>{{ kal.resolution_criteria or '—' }}</dd>
+      <dt>Close time</dt><dd>{{ kal.close_time }}</dd>
+      <dt>YES bid/ask</dt><dd>{{ kal.yes_bid }} / {{ kal.yes_ask }}</dd>
+      <dt>Volume</dt><dd>{{ kal.volume }}</dd>
+    </div>
+  </div>
+  <div class="card">
+    <h3>Poly US: <code>{{ pair.poly_us_market_id }}</code></h3>
+    <div class="kv">
+      <dt>Title</dt><dd>{{ poly.title }}</dd>
+      <dt>Description</dt><dd>{{ poly.description or '—' }}</dd>
+      <dt>Resolution</dt><dd>{{ poly.resolution_criteria or '—' }}</dd>
+      <dt>Source</dt><dd>{{ poly.resolution_source or '—' }}</dd>
+      <dt>Close time</dt><dd>{{ poly.close_time }}</dd>
+      <dt>YES bid/ask</dt><dd>{{ poly.yes_bid }} / {{ poly.yes_ask }}</dd>
+      <dt>Volume</dt><dd>{{ poly.volume }}</dd>
+    </div>
+  </div>
+</div>
+
+<div class="card">
+  <h3>Approve or reject</h3>
+  <form method="post" action="{{ url_for('approve', candidate_id=pair.candidate_id) }}" class="inline">
+    <label>Tag:
+      <select name="tag">
+        <option value="clean" {% if pair.resolution_divergence_risk in ('none','low') %}selected{% endif %}>clean (low risk)</option>
+        <option value="high_risk" {% if pair.resolution_divergence_risk in ('medium','high') %}selected{% endif %}>high_risk (segregate)</option>
+      </select>
+    </label>
+    <input type="text" name="notes" placeholder="Notes (optional)" style="margin:8px 0;">
+    <button type="submit">Approve</button>
+  </form>
+  <form method="post" action="{{ url_for('reject', candidate_id=pair.candidate_id) }}" class="inline" style="margin-left:16px;">
+    <input type="text" name="reason" placeholder="Reason (optional)">
+    <button type="submit" class="reject">Reject</button>
+  </form>
+</div>
+{% endblock %}

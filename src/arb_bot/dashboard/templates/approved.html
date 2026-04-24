@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Approved pairs</h1>
+<p>
+  Filter:
+  <a href="{{ url_for('approved_list', tag='all') }}">All</a> |
+  <a href="{{ url_for('approved_list', tag='clean') }}">Clean only</a> |
+  <a href="{{ url_for('approved_list', tag='high_risk') }}">High-risk only</a>
+</p>
+<table>
+  <thead>
+    <tr>
+      <th>Pair ID</th><th>Tag</th><th>Risk</th><th>Kalshi</th><th>Poly US</th><th>Approved</th>
+    </tr>
+  </thead>
+  <tbody>
+  {% for r in rows %}
+    <tr>
+      <td><code>{{ r.pair_id }}</code></td>
+      <td>
+        {% if r.tag == 'clean' %}<span class="pill pill-clean">clean</span>
+        {% else %}<span class="pill pill-high">high_risk</span>{% endif %}
+      </td>
+      <td>{{ r.resolution_divergence_risk }}</td>
+      <td><a href="{{ url_for('market_detail', venue='kalshi', market_id=r.kalshi_ticker) }}">{{ r.kalshi_title or r.kalshi_ticker }}</a></td>
+      <td><a href="{{ url_for('market_detail', venue='poly_us', market_id=r.poly_us_market_id) }}">{{ r.poly_title or r.poly_us_market_id }}</a></td>
+      <td class="muted">{{ r.approved_ts }}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

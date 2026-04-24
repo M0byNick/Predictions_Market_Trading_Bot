@@ -1,0 +1,34 @@
+[project]
+name = "arb-bot"
+version = "0.1.0"
+description = "Prediction-market arbitrage bot (paper v1): Kalshi <-> Polymarket US"
+requires-python = ">=3.11"
+dependencies = [
+    "requests>=2.31.0",
+    "cryptography>=42.0.0",
+    "python-dotenv>=1.0.0",
+    "pydantic>=2.6.0",
+    "numpy>=1.24.0",
+    "anthropic>=0.40.0",
+    "polymarket-us>=0.1.0",
+    "sentence-transformers>=2.7.0",
+    "flask>=3.0.0",
+    "jinja2>=3.1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "ruff>=0.4.0",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
