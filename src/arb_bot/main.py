@@ -6,7 +6,7 @@ from arb_bot.db import connect, init_schema
 from arb_bot.executor import paper as paper_exec
 from arb_bot.heartbeat import touch
 from arb_bot.ingest import kalshi as kalshi_ingest
-from arb_bot.ingest import polymarket_us as poly_ingest
+from arb_bot.ingest import polymarket_global as poly_ingest
 from arb_bot.mapping import embeddings as emb
 from arb_bot.risk import limits as risk
 from arb_bot.signal import spread as sig
@@ -25,7 +25,7 @@ def cycle() -> None:
         try:
             poly_ingest.upsert_markets(conn, cfg)
         except Exception:
-            log.exception("Polymarket US ingest failed")
+            log.exception("Polymarket Global ingest failed")
 
         try:
             emb.compute_missing(conn, cfg)

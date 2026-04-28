@@ -41,10 +41,10 @@ CREATE TABLE IF NOT EXISTS market_embeddings (
 CREATE TABLE IF NOT EXISTS candidate_pairs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     kalshi_ticker TEXT NOT NULL,
-    poly_us_market_id TEXT NOT NULL,
+    poly_global_market_id TEXT NOT NULL,
     cosine_similarity REAL NOT NULL,
     generated_ts INTEGER NOT NULL,
-    UNIQUE (kalshi_ticker, poly_us_market_id)
+    UNIQUE (kalshi_ticker, poly_global_market_id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_candidate_pairs_similarity ON candidate_pairs(cosine_similarity);
@@ -69,7 +69,7 @@ CREATE INDEX IF NOT EXISTS idx_pair_verdicts_candidate ON pair_verdicts(candidat
 CREATE TABLE IF NOT EXISTS approved_pairs (
     pair_id TEXT PRIMARY KEY,
     kalshi_ticker TEXT NOT NULL,
-    poly_us_market_id TEXT NOT NULL,
+    poly_global_market_id TEXT NOT NULL,
     normalized_question TEXT,
     resolution_divergence_risk TEXT NOT NULL,
     tag TEXT NOT NULL,
@@ -77,7 +77,7 @@ CREATE TABLE IF NOT EXISTS approved_pairs (
     approved_ts INTEGER NOT NULL,
     active INTEGER NOT NULL DEFAULT 1,
     notes TEXT,
-    UNIQUE (kalshi_ticker, poly_us_market_id)
+    UNIQUE (kalshi_ticker, poly_global_market_id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_approved_pairs_active ON approved_pairs(active, tag);

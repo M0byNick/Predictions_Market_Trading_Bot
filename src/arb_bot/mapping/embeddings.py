@@ -91,9 +91,9 @@ def _load_vectors(
 
 def generate_candidates(conn: sqlite3.Connection, cfg: Config) -> int:
     kalshi_ids, kalshi_mat = _load_vectors(conn, "kalshi", cfg.embed_model)
-    poly_ids, poly_mat = _load_vectors(conn, "poly_us", cfg.embed_model)
+    poly_ids, poly_mat = _load_vectors(conn, "poly_global", cfg.embed_model)
     if not kalshi_ids or not poly_ids:
-        log.info("generate_candidates: empty side (kalshi=%d, poly_us=%d)", len(kalshi_ids), len(poly_ids))
+        log.info("generate_candidates: empty side (kalshi=%d, poly_global=%d)", len(kalshi_ids), len(poly_ids))
         return 0
 
     # Both matrices are L2-normalized by SentenceTransformer, so dot = cosine
@@ -114,7 +114,7 @@ def generate_candidates(conn: sqlite3.Connection, cfg: Config) -> int:
                 cur = conn.execute(
                     """
                     INSERT OR IGNORE INTO candidate_pairs
-                    (kalshi_ticker, poly_us_market_id, cosine_similarity, generated_ts)
+                    (kalshi_ticker, poly_global_market_id, cosine_similarity, generated_ts)
                     VALUES (?, ?, ?, ?)
                     """,
                     (kal, poly, score, now_ts),
@@ -128,11 +128,11 @@ def generate_candidates(conn: sqlite3.Connection, cfg: Config) -> int:
 def pending_candidates(conn: sqlite3.Connection) -> Iterable[sqlite3.Row]:
     return conn.execute(
         """
-        SELECT c.id, c.kalshi_ticker, c.poly_us_market_id, c.cosine_similarity
+        SELECT c.id, c.kalshi_ticker, c.poly_global_market_id, c.cosine_similarity
         FROM candidate_pairs c
         LEFT JOIN pair_verdicts v ON v.candidate_id = c.id
         LEFT JOIN approved_pairs a
-          ON a.kalshi_ticker = c.kalshi_ticker AND a.poly_us_market_id = c.poly_us_market_id
+          ON a.kalshi_ticker = c.kalshi_ticker AND a.poly_global_market_id = c.poly_global_market_id
         LEFT JOIN rejected_pairs r ON r.candidate_id = c.id
         WHERE v.id IS NULL AND a.pair_id IS NULL AND r.candidate_id IS NULL
         ORDER BY c.cosine_similarity DESC

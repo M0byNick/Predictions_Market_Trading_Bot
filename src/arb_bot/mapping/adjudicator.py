@@ -35,7 +35,7 @@ KALSHI
   close_time (unix): {kalshi_close_time}
   resolution_time (unix): {kalshi_resolution_time}
 
-POLYMARKET US
+POLYMARKET GLOBAL
   market_id: {poly_id}
   title: {poly_title}
   description: {poly_description}
@@ -53,8 +53,8 @@ def _render_prompt(candidate: sqlite3.Row, conn: sqlite3.Connection) -> str:
         (candidate["kalshi_ticker"],),
     ).fetchone()
     poly = conn.execute(
-        "SELECT * FROM markets WHERE venue='poly_us' AND venue_market_id=?",
-        (candidate["poly_us_market_id"],),
+        "SELECT * FROM markets WHERE venue='poly_global' AND venue_market_id=?",
+        (candidate["poly_global_market_id"],),
     ).fetchone()
     if not kal or not poly:
         raise ValueError(f"Missing market data for candidate {candidate['id']}")

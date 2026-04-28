@@ -31,8 +31,8 @@ def create_app() -> Flask:
                 "markets_kalshi": conn.execute(
                     "SELECT COUNT(*) FROM markets WHERE venue='kalshi' AND status='open'"
                 ).fetchone()[0],
-                "markets_poly_us": conn.execute(
-                    "SELECT COUNT(*) FROM markets WHERE venue='poly_us' AND status='open'"
+                "markets_poly_global": conn.execute(
+                    "SELECT COUNT(*) FROM markets WHERE venue='poly_global' AND status='open'"
                 ).fetchone()[0],
                 "candidates_total": conn.execute("SELECT COUNT(*) FROM candidate_pairs").fetchone()[0],
                 "verdicts_total": conn.execute("SELECT COUNT(*) FROM pair_verdicts").fetchone()[0],
@@ -51,7 +51,7 @@ def create_app() -> Flask:
                     SELECT COUNT(*) FROM candidate_pairs c
                     JOIN pair_verdicts v ON v.candidate_id = c.id
                     LEFT JOIN approved_pairs a
-                      ON a.kalshi_ticker=c.kalshi_ticker AND a.poly_us_market_id=c.poly_us_market_id
+                      ON a.kalshi_ticker=c.kalshi_ticker AND a.poly_global_market_id=c.poly_global_market_id
                     LEFT JOIN rejected_pairs r ON r.candidate_id=c.id
                     WHERE a.pair_id IS NULL AND r.candidate_id IS NULL
                     """
@@ -64,7 +64,7 @@ def create_app() -> Flask:
         with db() as conn:
             row = conn.execute(
                 """
-                SELECT c.id AS candidate_id, c.kalshi_ticker, c.poly_us_market_id,
+                SELECT c.id AS candidate_id, c.kalshi_ticker, c.poly_global_market_id,
                        c.cosine_similarity,
                        v.id AS verdict_id, v.match, v.confidence, v.resolution_aligned,
                        v.resolution_divergence_risk, v.divergence_reason,
@@ -72,7 +72,7 @@ def create_app() -> Flask:
                 FROM candidate_pairs c
                 JOIN pair_verdicts v ON v.candidate_id = c.id
                 LEFT JOIN approved_pairs a
-                  ON a.kalshi_ticker = c.kalshi_ticker AND a.poly_us_market_id = c.poly_us_market_id
+                  ON a.kalshi_ticker = c.kalshi_ticker AND a.poly_global_market_id = c.poly_global_market_id
                 LEFT JOIN rejected_pairs r ON r.candidate_id = c.id
                 WHERE a.pair_id IS NULL AND r.candidate_id IS NULL
                 ORDER BY
@@ -88,8 +88,8 @@ def create_app() -> Flask:
                 (row["kalshi_ticker"],),
             ).fetchone()
             poly = conn.execute(
-                "SELECT * FROM markets WHERE venue='poly_us' AND venue_market_id=?",
-                (row["poly_us_market_id"],),
+                "SELECT * FROM markets WHERE venue='poly_global' AND venue_market_id=?",
+                (row["poly_global_market_id"],),
             ).fetchone()
         return render_template("queue.html", pair=row, kal=kal, poly=poly)
 
@@ -112,19 +112,19 @@ def create_app() -> Flask:
             ).fetchone()
             if not cand:
                 abort(404)
-            pair_id = f"{cand['kalshi_ticker']}__{cand['poly_us_market_id']}"[:120]
+            pair_id = f"{cand['kalshi_ticker']}__{cand['poly_global_market_id']}"[:120]
             with transaction(conn):
                 conn.execute(
                     """
                     INSERT OR REPLACE INTO approved_pairs
-                    (pair_id, kalshi_ticker, poly_us_market_id, normalized_question,
+                    (pair_id, kalshi_ticker, poly_global_market_id, normalized_question,
                      resolution_divergence_risk, tag, approved_by, approved_ts, active, notes)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
                     """,
                     (
                         pair_id,
                         cand["kalshi_ticker"],
-                        cand["poly_us_market_id"],
+                        cand["poly_global_market_id"],
                         cand["normalized_question"],
                         cand["resolution_divergence_risk"],
                         tag,
@@ -165,7 +165,7 @@ def create_app() -> Flask:
                 SELECT a.*, m1.title AS kalshi_title, m2.title AS poly_title
                 FROM approved_pairs a
                 LEFT JOIN markets m1 ON m1.venue='kalshi' AND m1.venue_market_id=a.kalshi_ticker
-                LEFT JOIN markets m2 ON m2.venue='poly_us' AND m2.venue_market_id=a.poly_us_market_id
+                LEFT JOIN markets m2 ON m2.venue='poly_global' AND m2.venue_market_id=a.poly_global_market_id
                 WHERE a.active=1
             """
             params: tuple = ()
@@ -181,12 +181,12 @@ def create_app() -> Flask:
         with db() as conn:
             rows = conn.execute(
                 """
-                SELECT r.*, c.kalshi_ticker, c.poly_us_market_id, c.cosine_similarity,
+                SELECT r.*, c.kalshi_ticker, c.poly_global_market_id, c.cosine_similarity,
                        m1.title AS kalshi_title, m2.title AS poly_title
                 FROM rejected_pairs r
                 JOIN candidate_pairs c ON c.id = r.candidate_id
                 LEFT JOIN markets m1 ON m1.venue='kalshi' AND m1.venue_market_id=c.kalshi_ticker
-                LEFT JOIN markets m2 ON m2.venue='poly_us' AND m2.venue_market_id=c.poly_us_market_id
+                LEFT JOIN markets m2 ON m2.venue='poly_global' AND m2.venue_market_id=c.poly_global_market_id
                 ORDER BY r.rejected_ts DESC
                 LIMIT 200
                 """
@@ -195,7 +195,7 @@ def create_app() -> Flask:
 
     @app.get("/market/<venue>/<path:market_id>")
     def market_detail(venue: str, market_id: str):
-        if venue not in ("kalshi", "poly_us"):
+        if venue not in ("kalshi", "poly_global"):
             abort(400)
         with db() as conn:
             row = conn.execute(

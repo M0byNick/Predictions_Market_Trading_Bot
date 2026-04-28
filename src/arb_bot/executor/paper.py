@@ -27,7 +27,7 @@ def simulate_fill(
       - no partial-fill modeling (phase 2)
       - fees applied per leg from arb_bot.signal.spread constants
     """
-    from arb_bot.signal.spread import KALSHI_FEE_BPS, POLY_US_FEE_BPS
+    from arb_bot.signal.spread import KALSHI_FEE_BPS, POLY_GLOBAL_FEE_BPS
 
     now_ts = int(time.time())
     slip = SLIPPAGE_BPS / 10_000.0
@@ -67,7 +67,7 @@ def simulate_fill(
             """
             INSERT INTO paper_fills (signal_id, pair_id, leg, side, contract,
                 price_intended, price_filled, size_filled, fees_usd, ts, state)
-            VALUES (?, ?, 'poly_us', ?, 'yes', ?, ?, ?, ?, ?, 'filled')
+            VALUES (?, ?, 'poly_global', ?, 'yes', ?, ?, ?, ?, ?, 'filled')
             """,
             (
                 signal_id,
@@ -76,7 +76,7 @@ def simulate_fill(
                 poly_price_intended,
                 poly_price_filled,
                 sig.size_units,
-                _fee_usd(poly_price_filled, sig.size_units, POLY_US_FEE_BPS),
+                _fee_usd(poly_price_filled, sig.size_units, POLY_GLOBAL_FEE_BPS),
                 now_ts,
             ),
         )

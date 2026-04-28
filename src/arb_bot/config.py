@@ -36,14 +36,13 @@ class Config:
     kalshi_private_key_path: Path
     kalshi_base_url: str
 
-    # Polymarket US
-    poly_us_access_key: str
-    poly_us_secret_key: str
-    poly_us_base_url: str
-
-    # Polymarket Global (read-only reference)
+    # Polymarket Global (primary venue for non-US users — Ireland/EU/etc.)
+    # No auth needed for read-only ingest. Wallet only required for live
+    # trading; for paper v1 we leave poly_wallet_private_key empty.
     poly_global_gamma_url: str
     poly_global_clob_url: str
+    poly_global_rate_per_sec: float
+    poly_wallet_private_key: str  # Polygon EIP-712 key for live trading; empty in paper
 
     # Anthropic
     anthropic_api_key: str
@@ -76,11 +75,10 @@ def load_config() -> Config:
         kalshi_access_key=_env("KALSHI_ACCESS_KEY"),
         kalshi_private_key_path=Path(_env("KALSHI_PRIVATE_KEY_PATH", "./secrets/kalshi.pem")),
         kalshi_base_url=_env("KALSHI_BASE_URL", "https://api.elections.kalshi.com/trade-api/v2"),
-        poly_us_access_key=_env("POLY_US_ACCESS_KEY"),
-        poly_us_secret_key=_env("POLY_US_SECRET_KEY"),
-        poly_us_base_url=_env("POLY_US_BASE_URL", "https://api.polymarket.us/v1"),
         poly_global_gamma_url=_env("POLY_GLOBAL_GAMMA_URL", "https://gamma-api.polymarket.com"),
         poly_global_clob_url=_env("POLY_GLOBAL_CLOB_URL", "https://clob.polymarket.com"),
+        poly_global_rate_per_sec=_env_float("POLY_GLOBAL_RATE_PER_SEC", 8.0),
+        poly_wallet_private_key=_env("POLY_WALLET_PRIVATE_KEY"),
         anthropic_api_key=_env("ANTHROPIC_API_KEY"),
         anthropic_model=_env("ANTHROPIC_MODEL", "claude-sonnet-4-6"),
         paper_max_position_usd=_env_float("PAPER_MAX_POSITION_USD", 500.0),

@@ -10,7 +10,7 @@
 <table>
   <thead>
     <tr>
-      <th>Pair ID</th><th>Tag</th><th>Risk</th><th>Kalshi</th><th>Poly US</th><th>Approved</th>
+      <th>Pair ID</th><th>Tag</th><th>Risk</th><th>Kalshi</th><th>Polymarket</th><th>Approved</th>
     </tr>
   </thead>
   <tbody>
@@ -23,7 +23,7 @@
       </td>
       <td>{{ r.resolution_divergence_risk }}</td>
       <td><a href="{{ url_for('market_detail', venue='kalshi', market_id=r.kalshi_ticker) }}">{{ r.kalshi_title or r.kalshi_ticker }}</a></td>
-      <td><a href="{{ url_for('market_detail', venue='poly_us', market_id=r.poly_us_market_id) }}">{{ r.poly_title or r.poly_us_market_id }}</a></td>
+      <td><a href="{{ url_for('market_detail', venue='poly_global', market_id=r.poly_global_market_id) }}">{{ r.poly_title or r.poly_global_market_id }}</a></td>
       <td class="muted">{{ r.approved_ts }}</td>
     </tr>
   {% endfor %}

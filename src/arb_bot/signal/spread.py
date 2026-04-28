@@ -9,8 +9,8 @@ log = logging.getLogger(__name__)
 
 # Fee assumptions (paper; tune when live venue data is connected).
 # Kalshi fees scale with price — conservative flat rate for paper.
-KALSHI_FEE_BPS = 70  # ~0.7% round-trip estimate per leg
-POLY_US_FEE_BPS = 50  # ~0.5% round-trip estimate per leg
+KALSHI_FEE_BPS = 70  # ~0.7% Kalshi taker side, paper conservative estimate
+POLY_GLOBAL_FEE_BPS = 200  # 2.0% Polymarket Global TAKER fee (0% maker; arb generally crosses)
 
 
 @dataclass
@@ -36,7 +36,7 @@ def _mid(bid: float | None, ask: float | None) -> float | None:
 
 def _sum_fee_bps() -> int:
     # Round trip = buy one side + sell (or symmetric buy) the other. Both legs charged.
-    return KALSHI_FEE_BPS + POLY_US_FEE_BPS
+    return KALSHI_FEE_BPS + POLY_GLOBAL_FEE_BPS
 
 
 def detect_for_pair(conn: sqlite3.Connection, cfg: Config, pair_row: sqlite3.Row) -> ArbSignal | None:
@@ -45,8 +45,8 @@ def detect_for_pair(conn: sqlite3.Connection, cfg: Config, pair_row: sqlite3.Row
         (pair_row["kalshi_ticker"],),
     ).fetchone()
     poly = conn.execute(
-        "SELECT yes_bid, yes_ask FROM markets WHERE venue='poly_us' AND venue_market_id=?",
-        (pair_row["poly_us_market_id"],),
+        "SELECT yes_bid, yes_ask FROM markets WHERE venue='poly_global' AND venue_market_id=?",
+        (pair_row["poly_global_market_id"],),
     ).fetchone()
     if not kal or not poly:
         return None
