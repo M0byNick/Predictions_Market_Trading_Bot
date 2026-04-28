@@ -76,10 +76,26 @@ class KalshiClient:
         r.raise_for_status()
         return r.json()
 
-    def list_open_markets(self, limit: int = 1000) -> Iterable[dict]:
+    def list_open_markets(
+        self, limit: int = 1000, min_volume: int = 100
+    ) -> Iterable[dict]:
+        """Iterate active Kalshi markets via cursor pagination.
+
+        Kalshi's `/markets` returns ~750K markets total when unfiltered (most
+        are stale or never-traded). Pass `min_volume` (in float-precision
+        contracts) to filter at the API layer — `100` matches Tracker_Kalshi's
+        Phase-1 default and cuts to ~10-20K liquid markets.
+
+        Note: Kalshi's API uses status='active' rather than 'open'; we
+        accept 'active' from the venue but normalize to 'open' downstream.
+        """
         cursor = None
         while True:
-            params = {"status": "open", "limit": limit}
+            params: dict[str, object] = {
+                "status": "open",  # Kalshi API filter; venue still echoes status='active' on rows
+                "limit": limit,
+                "min_volume": min_volume,
+            }
             if cursor:
                 params["cursor"] = cursor
             data = self._get("/markets", params=params)
@@ -90,15 +106,38 @@ class KalshiClient:
                 break
 
 
+def _safe_float(v) -> float | None:
+    if v is None:
+        return None
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
 def _extract_market_row(m: dict, now_ts: int) -> tuple:
-    yes_bid = _cents_to_price(m.get("yes_bid"))
-    yes_ask = _cents_to_price(m.get("yes_ask"))
-    no_bid = _cents_to_price(m.get("no_bid"))
-    no_ask = _cents_to_price(m.get("no_ask"))
+    """Adapt a Kalshi /markets response row to the unified schema.
+
+    Kalshi field names (April 2026 confirmed):
+      yes_bid_dollars / yes_ask_dollars   - already-formatted dollar prices (0.0-1.0)
+      no_bid_dollars  / no_ask_dollars
+      volume_fp                           - float-precision lifetime volume in contracts
+      liquidity_dollars                   - current orderbook depth in USD
+      status                              - 'active' | 'finalized' | 'settled' | ...
+    Older `yes_bid` (cents) fields are gone. We stick to *_dollars and *_fp.
+    """
+    yes_bid = _safe_float(m.get("yes_bid_dollars"))
+    yes_ask = _safe_float(m.get("yes_ask_dollars"))
+    no_bid = _safe_float(m.get("no_bid_dollars"))
+    no_ask = _safe_float(m.get("no_ask_dollars"))
+    # Normalize Kalshi's 'active' to our unified 'open' status
+    status = m.get("status") or "active"
+    if status == "active":
+        status = "open"
     return (
         "kalshi",
         m["ticker"],
-        m.get("title") or m.get("subtitle"),
+        m.get("title") or m.get("yes_sub_title"),
         m.get("rules_primary"),
         m.get("rules_secondary"),
         None,
@@ -108,19 +147,13 @@ def _extract_market_row(m: dict, now_ts: int) -> tuple:
         yes_ask,
         no_bid,
         no_ask,
-        float(m.get("volume", 0) or 0),
-        float(m.get("liquidity", 0) or 0),
+        _safe_float(m.get("volume_fp")) or 0.0,
+        _safe_float(m.get("liquidity_dollars")) or 0.0,
         now_ts,
         now_ts,
-        m.get("status", "open"),
-        json.dumps(m),
+        status,
+        None,  # raw_json — filled in by upsert_markets if cfg.store_raw_json
     )
-
-
-def _cents_to_price(v) -> float | None:
-    if v is None:
-        return None
-    return float(v) / 100.0
 
 
 def _iso_to_ts(v: str | None) -> int | None:
@@ -134,53 +167,93 @@ def _iso_to_ts(v: str | None) -> int | None:
         return None
 
 
+_UPSERT_SQL = """
+    INSERT INTO markets (venue, venue_market_id, title, description,
+        resolution_criteria, resolution_source, close_time, resolution_time,
+        yes_bid, yes_ask, no_bid, no_ask, volume, liquidity,
+        first_seen_ts, last_seen_ts, status, raw_json)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+    ON CONFLICT(venue, venue_market_id) DO UPDATE SET
+        title=excluded.title,
+        description=excluded.description,
+        resolution_criteria=excluded.resolution_criteria,
+        close_time=excluded.close_time,
+        resolution_time=excluded.resolution_time,
+        yes_bid=excluded.yes_bid,
+        yes_ask=excluded.yes_ask,
+        no_bid=excluded.no_bid,
+        no_ask=excluded.no_ask,
+        volume=excluded.volume,
+        liquidity=excluded.liquidity,
+        last_seen_ts=excluded.last_seen_ts,
+        status=excluded.status,
+        raw_json=excluded.raw_json
+"""
+
+# Commit every COMMIT_BATCH markets so the WAL doesn't grow unbounded
+# during a single ingest cycle. With ~10k markets and ~2KB raw_json each,
+# a single transaction would otherwise hold ~20-30MB in WAL until COMMIT;
+# more importantly, if anything goes wrong mid-cycle we lose nothing.
+COMMIT_BATCH = 500
+
+
 def upsert_markets(conn: sqlite3.Connection, cfg: Config) -> int:
     client = KalshiClient(cfg)
     now_ts = int(time.time())
+
+    # Audit log entry committed up-front
+    conn.execute(
+        "INSERT INTO ingestion_runs(venue, started_ts) VALUES (?, ?)", ("kalshi", now_ts)
+    )
+    run_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+    conn.commit()
+
     count = 0
-    with transaction(conn):
-        conn.execute(
-            "INSERT INTO ingestion_runs(venue, started_ts) VALUES (?, ?)", ("kalshi", now_ts)
-        )
-        run_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-        try:
-            for m in client.list_open_markets():
-                row = _extract_market_row(m, now_ts)
-                conn.execute(
-                    """
-                    INSERT INTO markets (venue, venue_market_id, title, description,
-                        resolution_criteria, resolution_source, close_time, resolution_time,
-                        yes_bid, yes_ask, no_bid, no_ask, volume, liquidity,
-                        first_seen_ts, last_seen_ts, status, raw_json)
-                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-                    ON CONFLICT(venue, venue_market_id) DO UPDATE SET
-                        title=excluded.title,
-                        description=excluded.description,
-                        resolution_criteria=excluded.resolution_criteria,
-                        close_time=excluded.close_time,
-                        resolution_time=excluded.resolution_time,
-                        yes_bid=excluded.yes_bid,
-                        yes_ask=excluded.yes_ask,
-                        no_bid=excluded.no_bid,
-                        no_ask=excluded.no_ask,
-                        volume=excluded.volume,
-                        liquidity=excluded.liquidity,
-                        last_seen_ts=excluded.last_seen_ts,
-                        status=excluded.status,
-                        raw_json=excluded.raw_json
-                    """,
-                    row,
+    skipped = 0
+    pending = 0
+    min_vol = cfg.kalshi_min_volume
+    try:
+        for m in client.list_open_markets():
+            v = m.get("volume_fp") or 0
+            try:
+                v = float(v)
+            except (TypeError, ValueError):
+                v = 0.0
+            if v < min_vol:
+                skipped += 1
+                continue
+            row = _extract_market_row(m, now_ts)
+            if cfg.store_raw_json:
+                row = row[:-1] + (json.dumps(m),)
+            conn.execute(_UPSERT_SQL, row)
+            count += 1
+            pending += 1
+            if pending >= COMMIT_BATCH:
+                conn.commit()
+                log.info(
+                    "Kalshi: committed batch — %d markets kept, %d skipped < $%.0f vol",
+                    count, skipped, min_vol,
                 )
-                count += 1
-            conn.execute(
-                "UPDATE ingestion_runs SET finished_ts=?, markets_upserted=? WHERE id=?",
-                (int(time.time()), count, run_id),
-            )
-        except Exception as e:
-            conn.execute(
-                "UPDATE ingestion_runs SET finished_ts=?, error=? WHERE id=?",
-                (int(time.time()), str(e), run_id),
-            )
-            raise
-    log.info("Kalshi: upserted %d markets", count)
+                pending = 0
+        conn.commit()
+        conn.execute(
+            "UPDATE ingestion_runs SET finished_ts=?, markets_upserted=? WHERE id=?",
+            (int(time.time()), count, run_id),
+        )
+        conn.commit()
+    except Exception as e:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        conn.execute(
+            "UPDATE ingestion_runs SET finished_ts=?, error=? WHERE id=?",
+            (int(time.time()), str(e), run_id),
+        )
+        conn.commit()
+        raise
+    log.info(
+        "Kalshi: upserted %d markets (skipped %d below $%.0f volume threshold)",
+        count, skipped, min_vol,
+    )
     return count

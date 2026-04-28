@@ -170,59 +170,94 @@ def _extract_market_row(m: dict, now_ts: int) -> tuple:
         now_ts,
         now_ts,
         "open" if m.get("active") and not m.get("closed") else "closed",
-        json.dumps(m),
+        None,  # raw_json — filled by upsert_markets if cfg.store_raw_json
     )
+
+
+_UPSERT_SQL = """
+    INSERT INTO markets (venue, venue_market_id, title, description,
+        resolution_criteria, resolution_source, close_time, resolution_time,
+        yes_bid, yes_ask, no_bid, no_ask, volume, liquidity,
+        first_seen_ts, last_seen_ts, status, raw_json)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+    ON CONFLICT(venue, venue_market_id) DO UPDATE SET
+        title=excluded.title,
+        description=excluded.description,
+        resolution_criteria=excluded.resolution_criteria,
+        resolution_source=excluded.resolution_source,
+        close_time=excluded.close_time,
+        resolution_time=excluded.resolution_time,
+        yes_bid=excluded.yes_bid,
+        yes_ask=excluded.yes_ask,
+        no_bid=excluded.no_bid,
+        no_ask=excluded.no_ask,
+        volume=excluded.volume,
+        liquidity=excluded.liquidity,
+        last_seen_ts=excluded.last_seen_ts,
+        status=excluded.status,
+        raw_json=excluded.raw_json
+"""
+
+COMMIT_BATCH = 500  # commit per page to keep WAL bounded
 
 
 def upsert_markets(conn: sqlite3.Connection, cfg: Config) -> int:
     client = PolyGlobalClient(cfg)
     now_ts = int(time.time())
+
+    conn.execute(
+        "INSERT INTO ingestion_runs(venue, started_ts) VALUES (?, ?)",
+        ("poly_global", now_ts),
+    )
+    run_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+    conn.commit()
+
     count = 0
-    with transaction(conn):
-        conn.execute(
-            "INSERT INTO ingestion_runs(venue, started_ts) VALUES (?, ?)",
-            ("poly_global", now_ts),
-        )
-        run_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-        try:
-            for m in client.list_open_markets():
-                row = _extract_market_row(m, now_ts)
-                conn.execute(
-                    """
-                    INSERT INTO markets (venue, venue_market_id, title, description,
-                        resolution_criteria, resolution_source, close_time, resolution_time,
-                        yes_bid, yes_ask, no_bid, no_ask, volume, liquidity,
-                        first_seen_ts, last_seen_ts, status, raw_json)
-                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-                    ON CONFLICT(venue, venue_market_id) DO UPDATE SET
-                        title=excluded.title,
-                        description=excluded.description,
-                        resolution_criteria=excluded.resolution_criteria,
-                        resolution_source=excluded.resolution_source,
-                        close_time=excluded.close_time,
-                        resolution_time=excluded.resolution_time,
-                        yes_bid=excluded.yes_bid,
-                        yes_ask=excluded.yes_ask,
-                        no_bid=excluded.no_bid,
-                        no_ask=excluded.no_ask,
-                        volume=excluded.volume,
-                        liquidity=excluded.liquidity,
-                        last_seen_ts=excluded.last_seen_ts,
-                        status=excluded.status,
-                        raw_json=excluded.raw_json
-                    """,
-                    row,
+    skipped = 0
+    pending = 0
+    min_vol = cfg.poly_global_min_volume
+    try:
+        for m in client.list_open_markets():
+            v = m.get("volumeNum") or m.get("volume") or 0
+            try:
+                v = float(v)
+            except (TypeError, ValueError):
+                v = 0.0
+            if v < min_vol:
+                skipped += 1
+                continue
+            row = _extract_market_row(m, now_ts)
+            if cfg.store_raw_json:
+                row = row[:-1] + (json.dumps(m),)
+            conn.execute(_UPSERT_SQL, row)
+            count += 1
+            pending += 1
+            if pending >= COMMIT_BATCH:
+                conn.commit()
+                log.info(
+                    "Polymarket Global: committed batch — %d kept, %d skipped < $%.0f vol",
+                    count, skipped, min_vol,
                 )
-                count += 1
-            conn.execute(
-                "UPDATE ingestion_runs SET finished_ts=?, markets_upserted=? WHERE id=?",
-                (int(time.time()), count, run_id),
-            )
-        except Exception as e:
-            conn.execute(
-                "UPDATE ingestion_runs SET finished_ts=?, error=? WHERE id=?",
-                (int(time.time()), str(e), run_id),
-            )
-            raise
-    log.info("Polymarket Global: upserted %d markets", count)
+                pending = 0
+        conn.commit()
+        conn.execute(
+            "UPDATE ingestion_runs SET finished_ts=?, markets_upserted=? WHERE id=?",
+            (int(time.time()), count, run_id),
+        )
+        conn.commit()
+    except Exception as e:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        conn.execute(
+            "UPDATE ingestion_runs SET finished_ts=?, error=? WHERE id=?",
+            (int(time.time()), str(e), run_id),
+        )
+        conn.commit()
+        raise
+    log.info(
+        "Polymarket Global: upserted %d markets (skipped %d below $%.0f volume threshold)",
+        count, skipped, min_vol,
+    )
     return count
