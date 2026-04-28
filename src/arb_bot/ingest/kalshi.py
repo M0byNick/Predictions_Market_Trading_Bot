@@ -6,6 +6,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
+from urllib.parse import urlsplit
 
 import requests
 from cryptography.hazmat.primitives import hashes, serialization
@@ -49,15 +50,28 @@ class KalshiAuth:
 
 
 class KalshiClient:
+    """Kalshi REST client.
+
+    IMPORTANT: Kalshi's RSA-PSS signature is computed over the FULL host-relative
+    path (e.g., "/trade-api/v2/portfolio/balance"), not just the segment after
+    the API version prefix. We split the configured KALSHI_BASE_URL into
+    scheme+host vs path-prefix so callers can pass simple endpoints like
+    "/portfolio/balance" and we still sign the right string regardless of
+    whether the .env's base URL is "https://host" or "https://host/trade-api/v2".
+    """
+
     def __init__(self, cfg: Config, auth: KalshiAuth | None = None):
         self.cfg = cfg
         self.auth = auth or KalshiAuth.from_config(cfg)
         self.session = requests.Session()
-        self.base = cfg.kalshi_base_url.rstrip("/")
+        parts = urlsplit(cfg.kalshi_base_url.rstrip("/"))
+        self._scheme_host = f"{parts.scheme}://{parts.netloc}"
+        self._path_prefix = parts.path  # "" or "/trade-api/v2"
 
-    def _get(self, path: str, params: dict | None = None) -> dict:
-        url = f"{self.base}{path}"
-        headers = self.auth.headers("GET", path)
+    def _get(self, endpoint: str, params: dict | None = None) -> dict:
+        sign_path = f"{self._path_prefix}{endpoint}"
+        url = f"{self._scheme_host}{sign_path}"
+        headers = self.auth.headers("GET", sign_path)
         r = self.session.get(url, headers=headers, params=params, timeout=30)
         r.raise_for_status()
         return r.json()

@@ -5,6 +5,7 @@ import sqlite3
 import time
 from dataclasses import dataclass
 from typing import Iterable
+from urllib.parse import urlsplit
 
 import requests
 from cryptography.hazmat.primitives.asymmetric import ed25519
@@ -39,15 +40,25 @@ class PolyUSAuth:
 
 
 class PolyUSClient:
+    """Polymarket US REST client.
+
+    Same gotcha as Kalshi: the Ed25519 signature is computed over the FULL
+    host-relative path (e.g., "/v1/portfolio/positions"), not just the segment
+    after the version prefix.
+    """
+
     def __init__(self, cfg: Config, auth: PolyUSAuth | None = None):
         self.cfg = cfg
         self.auth = auth or PolyUSAuth.from_config(cfg)
         self.session = requests.Session()
-        self.base = cfg.poly_us_base_url.rstrip("/")
+        parts = urlsplit(cfg.poly_us_base_url.rstrip("/"))
+        self._scheme_host = f"{parts.scheme}://{parts.netloc}"
+        self._path_prefix = parts.path  # "" or "/v1"
 
-    def _get(self, path: str, params: dict | None = None) -> dict:
-        url = f"{self.base}{path}"
-        headers = self.auth.headers("GET", path)
+    def _get(self, endpoint: str, params: dict | None = None) -> dict:
+        sign_path = f"{self._path_prefix}{endpoint}"
+        url = f"{self._scheme_host}{sign_path}"
+        headers = self.auth.headers("GET", sign_path)
         r = self.session.get(url, headers=headers, params=params, timeout=30)
         r.raise_for_status()
         return r.json()
