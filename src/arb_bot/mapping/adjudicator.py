@@ -23,6 +23,56 @@ Rules:
 - Scope differences are divergence: "Democrats win senate 2026" vs "Schumer wins re-election" are NOT the same.
 - Early-resolution / cancellation clauses that differ are divergence.
 - When in doubt, set match=ambiguous and resolution_divergence_risk=high.
+
+CLASSIFICATION EDGE CASES (RECURRENT BUGS — be especially careful):
+
+1. SENATE / HOUSE SEAT COUNTS BY PARTY
+   "Democrats hold 48 seats" is NOT logically equivalent to "Republicans hold 52 seats" out of 100.
+   Independents (e.g. Sanders, King, Sinema) caucus with a party but are NOT counted as that party's
+   seats by most resolution criteria. If a chamber has any Independents, the inverse-arithmetic
+   match breaks. ALWAYS rate seat-count-by-party pairs as match="ambiguous", risk="high" UNLESS
+   the resolution criteria for BOTH venues explicitly include the same definition of which
+   Independents (if any) count as Dem/Rep.
+
+2. PARTY NOMINEE
+   "Will X be the Dem nominee" can resolve differently if: there's a contested convention,
+   a candidate withdraws after primaries but before convention, write-in candidates are
+   counted differently, or one venue resolves on "ballot-listed" vs another on "primary winner".
+   Set risk=medium or higher unless resolution criteria explicitly align.
+
+3. POPULAR VOTE vs ELECTORAL COLLEGE
+   These are different events. "Will candidate X win" is ambiguous between popular-vote and
+   electoral-college outcomes. Faithless electors and contingent elections add edge cases.
+
+4. TOP-TWO / JUNGLE PRIMARY
+   "Top two primary" rules differ across states (CA, WA, LA all have variants). Confirm the
+   advancement rule (top-2 of all parties vs top-1-of-each-party) is identical at both venues.
+
+5. FED RATE QUANTUM
+   "Fed cuts by 25 bps" vs "Fed cuts" must agree on: target range mid-point vs upper bound,
+   IORB sub-band moves, statement timestamp vs press conference. "0 bps" usually = "no change"
+   but exotic configurations exist (e.g., emergency intermeeting cuts).
+
+6. CRYPTO PRICE THRESHOLDS
+   "Will BTC exceed $X" depends on: Coinbase / Binance / Chainlink / Pyth feed source AND
+   timestamp (close vs 23:59 UTC vs market hours vs intraday touch). Different feed = different
+   number = potential divergence.
+
+7. MACRO RELEASES (CPI / NFP / GDP / unemployment)
+   BLS / BEA initial-release vs revised numbers can differ by 0.1 percentage points or more.
+   "First print" vs "as of date X" are different resolutions.
+
+8. GEOPOLITICAL EVENT THRESHOLDS
+   "Major attack", "invasion", "ceasefire" — subjective definitions. Different venues will
+   resolve differently for ambiguous events. Default to risk=high.
+
+9. SPORTS GAME VOIDS
+   How does each venue handle: cancelled / postponed / forfeit / weather-shortened games?
+   Kalshi often voids; Polymarket often resolves on official ruling. This breaks arbs even
+   when the questions are otherwise identical.
+
+When ANY of these patterns apply, the floor for resolution_divergence_risk is "medium",
+and "high" if resolution criteria on each side don't explicitly resolve the ambiguity.
 """
 
 USER_TEMPLATE = """Evaluate this pair.

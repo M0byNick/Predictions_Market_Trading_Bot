@@ -61,28 +61,50 @@ def create_app() -> Flask:
 
     @app.get("/queue")
     def queue():
+        # Filter by tier:
+        #   "safest"  = match=yes, risk in (none,low), no edge_case_flags
+        #   "review"  = match=yes, risk in (none,low), HAS edge_case_flags (review carefully)
+        #   "ambig"   = match=ambiguous
+        #   "all"     = everything pending (default)
+        tier = request.args.get("tier", "safest")
         with db() as conn:
-            row = conn.execute(
-                """
-                SELECT c.id AS candidate_id, c.kalshi_ticker, c.poly_global_market_id,
-                       c.cosine_similarity,
-                       v.id AS verdict_id, v.match, v.confidence, v.resolution_aligned,
-                       v.resolution_divergence_risk, v.divergence_reason,
-                       v.normalized_question, v.reasoning
+            base = """
                 FROM candidate_pairs c
                 JOIN pair_verdicts v ON v.candidate_id = c.id
                 LEFT JOIN approved_pairs a
                   ON a.kalshi_ticker = c.kalshi_ticker AND a.poly_global_market_id = c.poly_global_market_id
                 LEFT JOIN rejected_pairs r ON r.candidate_id = c.id
                 WHERE a.pair_id IS NULL AND r.candidate_id IS NULL
-                ORDER BY
-                    CASE v.match WHEN 'yes' THEN 0 WHEN 'ambiguous' THEN 1 ELSE 2 END,
-                    v.confidence DESC
-                LIMIT 1
-                """
+            """
+            tier_clauses = {
+                "safest": (
+                    " AND v.match='yes' AND v.resolution_divergence_risk IN ('none','low')"
+                    " AND (v.edge_case_flags IS NULL OR v.edge_case_flags='[]')"
+                ),
+                "review": (
+                    " AND v.match='yes' AND v.resolution_divergence_risk IN ('none','low')"
+                    " AND v.edge_case_flags IS NOT NULL AND v.edge_case_flags!='[]'"
+                ),
+                "ambig": " AND v.match='ambiguous'",
+                "all": "",
+            }
+            order_by = (
+                " ORDER BY"
+                " CASE v.match WHEN 'yes' THEN 0 WHEN 'ambiguous' THEN 1 ELSE 2 END,"
+                " CASE WHEN v.edge_case_flags IS NULL OR v.edge_case_flags='[]' THEN 0 ELSE 1 END,"
+                " v.confidence DESC"
+            )
+            row = conn.execute(
+                """SELECT c.id AS candidate_id, c.kalshi_ticker, c.poly_global_market_id,
+                       c.cosine_similarity,
+                       v.id AS verdict_id, v.match, v.confidence, v.resolution_aligned,
+                       v.resolution_divergence_risk, v.divergence_reason,
+                       v.normalized_question, v.reasoning,
+                       v.edge_case_flags, v.edge_case_downgraded
+                """ + base + tier_clauses.get(tier, "") + order_by + " LIMIT 1"
             ).fetchone()
             if not row:
-                return render_template("queue_empty.html")
+                return render_template("queue_empty.html", tier=tier)
             kal = conn.execute(
                 "SELECT * FROM markets WHERE venue='kalshi' AND venue_market_id=?",
                 (row["kalshi_ticker"],),
@@ -91,7 +113,20 @@ def create_app() -> Flask:
                 "SELECT * FROM markets WHERE venue='poly_global' AND venue_market_id=?",
                 (row["poly_global_market_id"],),
             ).fetchone()
-        return render_template("queue.html", pair=row, kal=kal, poly=poly)
+            # Counts per tier for the navigation
+            tier_counts = {}
+            for tname, clause in tier_clauses.items():
+                if tname == "all":
+                    sql = "SELECT COUNT(*) " + base
+                else:
+                    sql = "SELECT COUNT(*) " + base + clause
+                tier_counts[tname] = conn.execute(sql).fetchone()[0]
+            edge_flags = json.loads(row["edge_case_flags"]) if row["edge_case_flags"] else []
+        return render_template(
+            "queue.html",
+            pair=row, kal=kal, poly=poly,
+            tier=tier, tier_counts=tier_counts, edge_flags=edge_flags,
+        )
 
     @app.post("/approve/<int:candidate_id>")
     def approve(candidate_id: int):

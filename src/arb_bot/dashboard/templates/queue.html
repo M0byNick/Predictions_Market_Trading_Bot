@@ -8,6 +8,41 @@
 {% endmacro %}
 {% block content %}
 <h1>Approval queue</h1>
+<div class="card" style="background:#fafafa;">
+  <strong>Filter by tier:</strong>
+  <a href="{{ url_for('queue', tier='safest') }}" {% if tier=='safest' %}style="font-weight:bold;"{% endif %}>
+    Safest ({{ tier_counts.safest }})
+  </a> &nbsp;|&nbsp;
+  <a href="{{ url_for('queue', tier='review') }}" {% if tier=='review' %}style="font-weight:bold;"{% endif %}>
+    Review-recommended ({{ tier_counts.review }})
+  </a> &nbsp;|&nbsp;
+  <a href="{{ url_for('queue', tier='ambig') }}" {% if tier=='ambig' %}style="font-weight:bold;"{% endif %}>
+    Ambiguous ({{ tier_counts.ambig }})
+  </a> &nbsp;|&nbsp;
+  <a href="{{ url_for('queue', tier='all') }}" {% if tier=='all' %}style="font-weight:bold;"{% endif %}>
+    All ({{ tier_counts.all }})
+  </a>
+  <div class="muted" style="margin-top:6px; font-size:13px;">
+    <strong>Safest</strong>: match=yes, low/none risk, no edge-case patterns hit. Approve confidently.<br>
+    <strong>Review-recommended</strong>: same as safest but title/desc hit a known edge-case pattern (Senate seat counts, party nominee, top-two primary, Fed quantum, etc.). Inspect carefully.<br>
+    <strong>Ambiguous</strong>: LLM was unsure. Manual judgment.
+  </div>
+</div>
+
+{% if edge_flags %}
+<div class="card" style="background:#fef5e7; border-left:4px solid #b77900;">
+  <h3 style="margin-top:0;">⚠ Edge-case warnings</h3>
+  <ul>
+    {% for f in edge_flags %}
+      <li><strong>{{ f.name }}</strong>: {{ f.why }}</li>
+    {% endfor %}
+  </ul>
+  {% if pair.edge_case_downgraded %}
+    <p style="color:#a83232;"><strong>Risk auto-downgraded to HIGH</strong> by domain-rule check (LLM under-rated this pair).</p>
+  {% endif %}
+</div>
+{% endif %}
+
 <div class="card">
   <h3>LLM verdict</h3>
   <div class="kv">
@@ -52,8 +87,8 @@
   <form method="post" action="{{ url_for('approve', candidate_id=pair.candidate_id) }}" class="inline">
     <label>Tag:
       <select name="tag">
-        <option value="clean" {% if pair.resolution_divergence_risk in ('none','low') %}selected{% endif %}>clean (low risk)</option>
-        <option value="high_risk" {% if pair.resolution_divergence_risk in ('medium','high') %}selected{% endif %}>high_risk (segregate)</option>
+        <option value="clean" {% if pair.resolution_divergence_risk in ('none','low') and not edge_flags %}selected{% endif %}>clean (low risk)</option>
+        <option value="high_risk" {% if pair.resolution_divergence_risk in ('medium','high') or edge_flags %}selected{% endif %}>high_risk (segregate)</option>
       </select>
     </label>
     <input type="text" name="notes" placeholder="Notes (optional)" style="margin:8px 0;">
