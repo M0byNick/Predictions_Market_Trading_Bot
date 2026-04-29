@@ -75,15 +75,106 @@ def _render_prompt(candidate: sqlite3.Row, conn: sqlite3.Connection) -> str:
     )
 
 
-def _parse_verdict(text: str) -> PairVerdict:
-    # Strip any code fences the model might emit defensively
+def _strip_fences(text: str) -> str:
     t = text.strip()
     if t.startswith("```"):
-        t = t.split("```", 2)[1]
-        if t.startswith("json"):
-            t = t[4:]
-        t = t.strip()
-    return PairVerdict.model_validate(json.loads(t))
+        # Drop opening fence (with or without `json` tag)
+        t = t.split("```", 2)
+        if len(t) >= 2:
+            body = t[1]
+            if body.startswith("json"):
+                body = body[4:]
+            elif body.startswith("JSON"):
+                body = body[4:]
+            t = body.strip()
+        else:
+            t = ""
+    # Drop trailing fence if present
+    if t.endswith("```"):
+        t = t[:-3].rstrip()
+    return t
+
+
+def _try_repair_truncated_json(s: str) -> str:
+    """Best-effort JSON repair when Sonnet's response was cut at max_tokens
+    mid-string. Strategy: walk the structure tracking quote/brace depth, then
+    close anything still open. Loses the trailing field but keeps everything
+    parsed up to that point.
+    """
+    out = []
+    in_string = False
+    escape = False
+    stack: list[str] = []
+    last_valid_end = 0  # index into `out` where we last had a clean structure
+
+    for i, ch in enumerate(s):
+        out.append(ch)
+        if escape:
+            escape = False
+            continue
+        if in_string:
+            if ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+        elif ch in "{[":
+            stack.append("}" if ch == "{" else "]")
+        elif ch in "}]":
+            if stack and stack[-1] == ch:
+                stack.pop()
+                last_valid_end = len(out)
+        elif ch == "," and not stack:
+            # extraneous trailing comma at top level (shouldn't happen)
+            pass
+
+    # If we ended inside a string, drop everything back to before the string
+    if in_string:
+        # Find the last unclosed quote
+        truncated = "".join(out)
+        last_quote = truncated.rfind('"')
+        if last_quote >= 0:
+            truncated = truncated[:last_quote]
+            out = list(truncated)
+            # Could be inside a "key": "value" — back up to a comma or brace
+            while out and out[-1] not in ",{[":
+                out.pop()
+            if out and out[-1] == ",":
+                out.pop()
+    # Close any remaining open braces/brackets
+    while stack:
+        out.append(stack.pop())
+    return "".join(out)
+
+
+def _parse_verdict(text: str) -> PairVerdict:
+    """Robust parser. Handles:
+      - markdown code fences (```json ... ```)
+      - extra prose before/after JSON
+      - max_tokens truncation (closes unterminated structures)
+      - missing required fields (PairVerdict has defaults)
+      - extra fields (extra='ignore')
+    """
+    t = _strip_fences(text)
+    # If there's prose before/after, find the outermost JSON object
+    if not t.startswith("{"):
+        first = t.find("{")
+        if first >= 0:
+            t = t[first:]
+    if not t.endswith("}"):
+        last = t.rfind("}")
+        if last >= 0:
+            t = t[: last + 1]
+
+    try:
+        data = json.loads(t)
+    except json.JSONDecodeError:
+        # Truncation repair — typical when max_tokens was hit mid-string
+        repaired = _try_repair_truncated_json(t)
+        data = json.loads(repaired)
+    return PairVerdict.model_validate(data)
 
 
 def adjudicate_sync(
@@ -175,28 +266,77 @@ def adjudicate_batch(
 
 
 def collect_batch_results(conn: sqlite3.Connection, cfg: Config, batch_id: str) -> int:
-    """Fetch a completed batch and write verdicts. Returns count written."""
+    """Fetch a completed batch and write verdicts. Returns count written.
+
+    Performance notes (2026-04-29):
+      - Single transaction for the entire write (was per-row; ~10,000x slower
+        on 18K+ rows due to fsync per commit).
+      - Skips writing if a verdict for (candidate_id, model) already exists,
+        so re-running is idempotent.
+      - Logs a parse-failure summary at the end with up to 5 sample raws so we
+        know which prompts to revise on next batch.
+    """
     client = Anthropic(api_key=cfg.anthropic_api_key)
     batch = client.messages.batches.retrieve(batch_id)
     if batch.processing_status != "ended":
         log.info("Batch %s still processing: %s", batch_id, batch.processing_status)
         return 0
 
-    count = 0
+    written = 0
+    parse_failures: list[tuple[str, str]] = []  # (custom_id, first 200 chars)
+    api_failures: list[str] = []
+    skipped_existing = 0
+
+    # Pre-seed which (candidate_id, model) pairs are already in pair_verdicts
+    existing = {
+        (r["candidate_id"], r["model"])
+        for r in conn.execute(
+            "SELECT candidate_id, model FROM pair_verdicts WHERE model = ?",
+            (cfg.anthropic_model,),
+        )
+    }
+
+    rows_to_write: list[tuple] = []
     for result in client.messages.batches.results(batch_id):
         if result.result.type != "succeeded":
-            log.warning("Batch item %s failed: %s", result.custom_id, result.result)
+            api_failures.append(result.custom_id)
             continue
         cand_id = int(result.custom_id.removeprefix("cand-"))
+        if (cand_id, cfg.anthropic_model) in existing:
+            skipped_existing += 1
+            continue
         msg = result.result.message
         text = "".join(b.text for b in msg.content if hasattr(b, "text"))
         try:
             verdict = _parse_verdict(text)
         except Exception as e:
-            log.exception("Parse failed for %s: %s", result.custom_id, e)
+            parse_failures.append((result.custom_id, text[:200].replace("\n", " ")))
+            if len(parse_failures) <= 3:
+                log.warning("Parse failed for %s: %s", result.custom_id, e)
             continue
+        rows_to_write.append(
+            (
+                cand_id,
+                verdict.match,
+                verdict.confidence,
+                verdict.resolution_aligned,
+                verdict.resolution_divergence_risk,
+                verdict.divergence_reason,
+                verdict.normalized_question,
+                verdict.reasoning,
+                cfg.anthropic_model,
+                int(time.time()),
+            )
+        )
+
+    log.info(
+        "Batch %s: %d rows queued, %d already-existing skipped, %d API errors, %d parse failures",
+        batch_id, len(rows_to_write), skipped_existing, len(api_failures), len(parse_failures),
+    )
+
+    if rows_to_write:
         with transaction(conn):
-            conn.execute(
+            conn.executemany(
                 """
                 INSERT INTO pair_verdicts
                 (candidate_id, match, confidence, resolution_aligned,
@@ -204,19 +344,14 @@ def collect_batch_results(conn: sqlite3.Connection, cfg: Config, batch_id: str) 
                  reasoning, model, verdict_ts)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (
-                    cand_id,
-                    verdict.match,
-                    verdict.confidence,
-                    verdict.resolution_aligned,
-                    verdict.resolution_divergence_risk,
-                    verdict.divergence_reason,
-                    verdict.normalized_question,
-                    verdict.reasoning,
-                    cfg.anthropic_model,
-                    int(time.time()),
-                ),
+                rows_to_write,
             )
-        count += 1
-    log.info("Batch %s: wrote %d verdicts", batch_id, count)
-    return count
+            written = len(rows_to_write)
+
+    if parse_failures:
+        log.warning("Sample parse failures (up to 5):")
+        for cid, snippet in parse_failures[:5]:
+            log.warning("  %s :: %s...", cid, snippet)
+
+    log.info("Batch %s: wrote %d verdicts", batch_id, written)
+    return written
