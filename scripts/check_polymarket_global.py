@@ -23,7 +23,7 @@ if _SRC.exists():
 
 def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
-    load_dotenv(_ARB_ROOT / ".env")
+    load_dotenv(_ARB_ROOT / ".env", override=True)
 
     if os.environ.get("DATA_DIR", "").startswith("/app"):
         os.environ["DATA_DIR"] = str(_ARB_ROOT / "data")

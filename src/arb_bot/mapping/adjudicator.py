@@ -104,7 +104,6 @@ def adjudicate_sync(
             msg = client.messages.create(
                 model=cfg.anthropic_model,
                 max_tokens=1024,
-                temperature=0.0,
                 system=SYSTEM_PROMPT,
                 messages=[{"role": "user", "content": prompt}],
             )
@@ -165,7 +164,6 @@ def adjudicate_batch(
                 params=BatchParam(
                     model=cfg.anthropic_model,
                     max_tokens=1024,
-                    temperature=0.0,
                     system=SYSTEM_PROMPT,
                     messages=[{"role": "user", "content": prompt}],
                 ),

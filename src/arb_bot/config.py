@@ -4,7 +4,11 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-load_dotenv()
+# override=True so the .env is authoritative over any pre-existing shell
+# environment variables (e.g. an empty ANTHROPIC_API_KEY left by the dev
+# harness). This is the right convention for a bot that owns its own auth.
+_DOTENV_PATH = Path(__file__).resolve().parents[2] / ".env"
+load_dotenv(_DOTENV_PATH, override=True)
 
 
 def _env(name: str, default: str | None = None, required: bool = False) -> str:

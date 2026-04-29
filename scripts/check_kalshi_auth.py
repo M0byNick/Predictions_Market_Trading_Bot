@@ -38,7 +38,7 @@ def _dev_mode_path_remap() -> dict[str, tuple[str, str]]:
     a dict of {var_name: (old_value, new_value)} for the report.
     """
     # Load .env first so we can see its values
-    load_dotenv(_ARB_ROOT / ".env")
+    load_dotenv(_ARB_ROOT / ".env", override=True)
     remapped: dict[str, tuple[str, str]] = {}
 
     # DATA_DIR: /app/data -> ./data (host) ; if no DATA_DIR, default to a tmpdir
