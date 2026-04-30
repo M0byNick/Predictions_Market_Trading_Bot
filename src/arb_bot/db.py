@@ -73,6 +73,7 @@ CREATE TABLE IF NOT EXISTS approved_pairs (
     poly_global_market_id TEXT NOT NULL,
     normalized_question TEXT,
     resolution_divergence_risk TEXT NOT NULL,
+    match_polarity TEXT NOT NULL DEFAULT 'unknown',
     tag TEXT NOT NULL,
     approved_by TEXT,
     approved_ts INTEGER NOT NULL,
@@ -152,10 +153,16 @@ def init_schema(db_path: Path) -> None:
     with connect(db_path) as conn:
         conn.executescript(SCHEMA)
         # Idempotent upgrades for existing databases
-        cols = {r["name"] for r in conn.execute("PRAGMA table_info(pair_verdicts)")}
-        if "match_polarity" not in cols:
+        verdict_cols = {r["name"] for r in conn.execute("PRAGMA table_info(pair_verdicts)")}
+        if "match_polarity" not in verdict_cols:
             conn.execute(
                 "ALTER TABLE pair_verdicts "
+                "ADD COLUMN match_polarity TEXT NOT NULL DEFAULT 'unknown'"
+            )
+        approved_cols = {r["name"] for r in conn.execute("PRAGMA table_info(approved_pairs)")}
+        if "match_polarity" not in approved_cols:
+            conn.execute(
+                "ALTER TABLE approved_pairs "
                 "ADD COLUMN match_polarity TEXT NOT NULL DEFAULT 'unknown'"
             )
         conn.commit()

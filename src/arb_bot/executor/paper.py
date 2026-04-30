@@ -32,6 +32,7 @@ def simulate_fill(
     now_ts = int(time.time())
     slip = SLIPPAGE_BPS / 10_000.0
 
+    # Same-polarity arbs: one buy + one sell, prices anchored to each leg's mid
     if sig.direction == "buy_kalshi_yes_sell_poly_yes":
         kal_side, kal_price_intended = "buy", sig.kalshi_yes_mid
         kal_price_filled = sig.kalshi_yes_mid + slip
@@ -42,7 +43,22 @@ def simulate_fill(
         kal_price_filled = sig.kalshi_yes_mid - slip
         poly_side, poly_price_intended = "buy", sig.poly_yes_mid
         poly_price_filled = sig.poly_yes_mid + slip
+    # Inverse-polarity arbs: BOTH buy or BOTH sell. Slippage adverse on
+    # whichever side we're crossing (buy → above mid; sell → below mid).
+    elif sig.direction == "sell_both_yes_inverse":
+        # sum_YES > $1, capture by selling both YES legs
+        kal_side, kal_price_intended = "sell", sig.kalshi_yes_mid
+        kal_price_filled = sig.kalshi_yes_mid - slip
+        poly_side, poly_price_intended = "sell", sig.poly_yes_mid
+        poly_price_filled = sig.poly_yes_mid - slip
+    elif sig.direction == "buy_both_yes_inverse":
+        # sum_YES < $1, capture by buying both YES legs
+        kal_side, kal_price_intended = "buy", sig.kalshi_yes_mid
+        kal_price_filled = sig.kalshi_yes_mid + slip
+        poly_side, poly_price_intended = "buy", sig.poly_yes_mid
+        poly_price_filled = sig.poly_yes_mid + slip
     else:
+        # flat / skip_polarity_unknown / anything we don't know how to fill
         return
 
     with transaction(conn):

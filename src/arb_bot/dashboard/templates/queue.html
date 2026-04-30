@@ -91,6 +91,24 @@
 <div class="card">
   <h3>Approve or reject</h3>
   <form method="post" action="{{ url_for('approve', candidate_id=pair.candidate_id) }}" class="inline">
+    <input type="hidden" name="tier" value="{{ tier }}">
+    {% if pair.match == 'yes' %}
+    <div style="margin-bottom:8px;">
+      Polarity (Kalshi YES is …):
+      <label style="margin-left:8px;">
+        <input type="radio" name="polarity" value="same" {% if pair.match_polarity != 'inverse' %}checked{% endif %}>
+        Poly YES (same direction)
+      </label>
+      <label style="margin-left:8px;">
+        <input type="radio" name="polarity" value="inverse" {% if pair.match_polarity == 'inverse' %}checked{% endif %}>
+        Poly NO (inverse — sum-to-$1 arb)
+      </label>
+      <label style="margin-left:8px;">
+        <input type="radio" name="polarity" value="unknown">
+        unsure
+      </label>
+    </div>
+    {% endif %}
     <label>Tag:
       <select name="tag">
         <option value="clean" {% if pair.resolution_divergence_risk in ('none','low') and not edge_flags %}selected{% endif %}>clean (low risk)</option>
@@ -101,6 +119,7 @@
     <button type="submit">Approve</button>
   </form>
   <form method="post" action="{{ url_for('reject', candidate_id=pair.candidate_id) }}" class="inline" style="margin-left:16px;">
+    <input type="hidden" name="tier" value="{{ tier }}">
     <input type="text" name="reason" placeholder="Reason (optional)">
     <button type="submit" class="reject">Reject</button>
   </form>

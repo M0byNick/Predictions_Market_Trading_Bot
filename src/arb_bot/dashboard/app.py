@@ -134,10 +134,14 @@ def create_app() -> Flask:
         if tag not in ("clean", "high_risk"):
             abort(400, "invalid tag")
         notes = request.form.get("notes", "")
+        # Optional explicit override (radio buttons in queue.html); falls back
+        # to the verdict's match_polarity if the form didn't send one.
+        override_polarity = request.form.get("polarity")
         with db() as conn:
             cand = conn.execute(
                 """
-                SELECT c.*, v.resolution_divergence_risk, v.normalized_question
+                SELECT c.*, v.resolution_divergence_risk, v.normalized_question,
+                       v.match_polarity
                 FROM candidate_pairs c
                 JOIN pair_verdicts v ON v.candidate_id = c.id
                 WHERE c.id = ?
@@ -147,14 +151,18 @@ def create_app() -> Flask:
             ).fetchone()
             if not cand:
                 abort(404)
+            polarity = (override_polarity or cand["match_polarity"] or "unknown").lower()
+            if polarity not in ("same", "inverse", "unknown"):
+                polarity = "unknown"
             pair_id = f"{cand['kalshi_ticker']}__{cand['poly_global_market_id']}"[:120]
             with transaction(conn):
                 conn.execute(
                     """
                     INSERT OR REPLACE INTO approved_pairs
                     (pair_id, kalshi_ticker, poly_global_market_id, normalized_question,
-                     resolution_divergence_risk, tag, approved_by, approved_ts, active, notes)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
+                     resolution_divergence_risk, match_polarity, tag, approved_by,
+                     approved_ts, active, notes)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
                     """,
                     (
                         pair_id,
@@ -162,14 +170,15 @@ def create_app() -> Flask:
                         cand["poly_global_market_id"],
                         cand["normalized_question"],
                         cand["resolution_divergence_risk"],
+                        polarity,
                         tag,
                         request.form.get("user", "nick"),
                         int(time.time()),
                         notes,
                     ),
                 )
-        flash(f"Approved {pair_id} as {tag}", "success")
-        return redirect(url_for("queue"))
+        flash(f"Approved {pair_id} as {tag} (polarity={polarity})", "success")
+        return redirect(url_for("queue", tier=request.form.get("tier", "safest")))
 
     @app.post("/reject/<int:candidate_id>")
     def reject(candidate_id: int):
@@ -190,7 +199,7 @@ def create_app() -> Flask:
                     ),
                 )
         flash(f"Rejected candidate #{candidate_id}", "warning")
-        return redirect(url_for("queue"))
+        return redirect(url_for("queue", tier=request.form.get("tier", "safest")))
 
     @app.get("/approved")
     def approved_list():
