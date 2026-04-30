@@ -1,0 +1,150 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Bulk review — {{ tier }} tier</h1>
+
+<div class="card" style="background:#fafafa;">
+  <strong>Filter by tier:</strong>
+  <a href="{{ url_for('queue_list', tier='safest') }}">Safest</a> |
+  <a href="{{ url_for('queue_list', tier='review') }}" {% if tier=='review' %}style="font-weight:bold;"{% endif %}>Review-recommended</a> |
+  <a href="{{ url_for('queue_list', tier='ambig') }}">Ambiguous</a> |
+  <a href="{{ url_for('queue_list', tier='all') }}">All</a>
+  &nbsp;&nbsp;
+  <a href="{{ url_for('queue', tier=tier) }}" style="font-size:13px;">(switch to one-at-a-time view)</a>
+  <div class="muted" style="margin-top:6px; font-size:13px;">
+    Bulk view shows {{ rows|length }} of {{ total }} pending in this tier.
+    Use checkboxes + the bulk button at the bottom to approve/reject many at once.
+  </div>
+</div>
+
+{% if flag_distribution %}
+<div class="card">
+  <h3>Filter by edge-case pattern</h3>
+  <p>
+    {% if flag_filter %}
+      Showing only <strong>{{ flag_filter }}</strong>.
+      <a href="{{ url_for('queue_list', tier=tier) }}">[clear filter]</a>
+    {% else %}
+      <em>No filter — showing all flagged patterns.</em>
+    {% endif %}
+  </p>
+  <p>
+  {% for name, n in flag_distribution %}
+    <a href="{{ url_for('queue_list', tier=tier, flag=name) }}"
+       style="display:inline-block; margin:2px; padding:4px 10px; border:1px solid var(--line); border-radius:4px; text-decoration:none; {% if name == flag_filter %}background:#fde7c2; font-weight:600;{% endif %}">
+      {{ name }} ({{ n }})
+    </a>
+  {% endfor %}
+  </p>
+</div>
+{% endif %}
+
+<form method="post" action="{{ url_for('bulk_action') }}" id="bulk-form">
+  <input type="hidden" name="tier" value="{{ tier }}">
+  <input type="hidden" name="flag" value="{{ flag_filter or '' }}">
+  <input type="hidden" name="page" value="{{ page }}">
+  <input type="hidden" name="candidate_ids" id="candidate_ids" value="">
+
+  <div class="card" style="position:sticky; top:0; z-index:10; background:#fff;">
+    <label><input type="checkbox" id="select-all"> Select all on page</label>
+    &nbsp;&nbsp;<span id="selection-count">0</span> selected
+    &nbsp;&nbsp;
+    <select name="tag">
+      <option value="clean">approve as: clean</option>
+      <option value="high_risk">approve as: high_risk</option>
+    </select>
+    <button type="submit" name="action" value="approve" onclick="return collectIds(this)">Approve selected</button>
+    <button type="submit" name="action" value="reject" class="reject" onclick="return collectIds(this)">Reject selected</button>
+  </div>
+
+  <table>
+    <thead>
+      <tr>
+        <th><input type="checkbox" id="select-all-2"></th>
+        <th>Match / risk</th>
+        <th>Polarity</th>
+        <th>Conf</th>
+        <th>Kalshi</th>
+        <th>Polymarket</th>
+        <th>Edge-case warnings</th>
+        <th>Quick</th>
+      </tr>
+    </thead>
+    <tbody>
+    {% for r in rows %}
+      <tr>
+        <td><input type="checkbox" class="row-cb" data-cid="{{ r.candidate_id }}"></td>
+        <td>
+          <span class="pill {% if r.match=='yes' %}pill-clean{% elif r.match=='ambiguous' %}pill-amb{% else %}pill-high{% endif %}">{{ r.match }}</span>
+          /{{ r.resolution_divergence_risk }}
+        </td>
+        <td>
+          {% if r.match_polarity == 'same' %}<span class="pill pill-clean">same</span>
+          {% elif r.match_polarity == 'inverse' %}<span class="pill pill-med" style="background:#fde7c2;">inverse</span>
+          {% else %}<span class="pill pill-amb">?</span>{% endif %}
+        </td>
+        <td>{{ "%.0f%%" % (r.confidence * 100) }}</td>
+        <td style="max-width:300px;">
+          <div style="font-size:13px;"><strong>{{ (r.k_title or '')[:90] }}</strong></div>
+          <div class="muted" style="font-size:12px;">YES {{ r.k_yes_bid }}/{{ r.k_yes_ask }}</div>
+        </td>
+        <td style="max-width:300px;">
+          <div style="font-size:13px;"><strong>{{ (r.p_title or '')[:90] }}</strong></div>
+          <div class="muted" style="font-size:12px;">YES {{ r.p_yes_bid }}/{{ r.p_yes_ask }}</div>
+        </td>
+        <td style="max-width:280px; font-size:11px;">
+          {% for f in r.edge_case_flags_parsed %}
+            <div style="margin:2px 0;">
+              <span class="pill pill-med" style="background:#fde7c2; font-size:10px;">{{ f.name }}</span>
+            </div>
+          {% endfor %}
+        </td>
+        <td style="font-size:11px;">
+          <a href="{{ url_for('queue', tier=tier) }}?focus={{ r.candidate_id }}">→ details</a>
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</form>
+
+<div class="card">
+  Page {{ page }} of {{ total_pages }} ({{ total }} total in this tier)
+  &nbsp;
+  {% if page > 1 %}<a href="{{ url_for('queue_list', tier=tier, flag=flag_filter, page=page-1) }}">← prev</a>{% endif %}
+  &nbsp;
+  {% if page < total_pages %}<a href="{{ url_for('queue_list', tier=tier, flag=flag_filter, page=page+1) }}">next →</a>{% endif %}
+</div>
+
+<script>
+const cbAll = document.getElementById('select-all');
+const cbAll2 = document.getElementById('select-all-2');
+const rowCbs = document.querySelectorAll('.row-cb');
+const countEl = document.getElementById('selection-count');
+
+function refreshCount() {
+  const n = document.querySelectorAll('.row-cb:checked').length;
+  countEl.textContent = n;
+}
+[cbAll, cbAll2].forEach(top => {
+  top && top.addEventListener('change', e => {
+    rowCbs.forEach(cb => cb.checked = e.target.checked);
+    refreshCount();
+  });
+});
+rowCbs.forEach(cb => cb.addEventListener('change', refreshCount));
+
+function collectIds(btn) {
+  const ids = Array.from(document.querySelectorAll('.row-cb:checked'))
+    .map(cb => cb.dataset.cid);
+  document.getElementById('candidate_ids').value = ids.join(',');
+  if (ids.length === 0) {
+    alert('No pairs selected.');
+    return false;
+  }
+  if (btn.value === 'reject' && !confirm(`Reject ${ids.length} pair(s)?`)) {
+    return false;
+  }
+  return true;
+}
+</script>
+{% endblock %}

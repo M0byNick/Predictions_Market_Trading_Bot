@@ -257,6 +257,191 @@ def create_app() -> Flask:
             ).fetchall()
         return render_template("rejected.html", rows=rows)
 
+    @app.get("/queue/list")
+    def queue_list():
+        """Bulk-review list view: many pairs at once with inline approve/reject.
+
+        Useful for the review-recommended tier where many pairs share an
+        edge_case_pattern and a reviewer can fly through them once they
+        understand the pattern.
+        """
+        tier = request.args.get("tier", "review")
+        flag_filter = request.args.get("flag")  # optional edge_case name filter
+        page = int(request.args.get("page", "1"))
+        per_page = int(request.args.get("per_page", "30"))
+
+        with db() as conn:
+            base = """
+                FROM candidate_pairs c
+                JOIN pair_verdicts v ON v.id = (
+                    SELECT id FROM pair_verdicts pv
+                    WHERE pv.candidate_id = c.id
+                    ORDER BY pv.verdict_ts DESC, pv.id DESC LIMIT 1
+                )
+                JOIN markets m1 ON m1.venue='kalshi' AND m1.venue_market_id=c.kalshi_ticker
+                JOIN markets m2 ON m2.venue='poly_global' AND m2.venue_market_id=c.poly_global_market_id
+                LEFT JOIN approved_pairs a
+                  ON a.kalshi_ticker = c.kalshi_ticker AND a.poly_global_market_id = c.poly_global_market_id
+                LEFT JOIN rejected_pairs r ON r.candidate_id = c.id
+                WHERE a.pair_id IS NULL AND r.candidate_id IS NULL
+            """
+            tier_clauses = {
+                "safest": " AND v.match='yes' AND v.resolution_divergence_risk IN ('none','low')"
+                          " AND (v.edge_case_flags IS NULL OR v.edge_case_flags='[]')",
+                "review": " AND v.match='yes' AND v.resolution_divergence_risk IN ('none','low')"
+                          " AND v.edge_case_flags IS NOT NULL AND v.edge_case_flags!='[]'",
+                "ambig": " AND v.match='ambiguous'",
+                "all": " AND v.match IN ('yes','ambiguous')",
+            }
+            params: list = []
+            sql = """
+                SELECT c.id AS candidate_id, c.kalshi_ticker, c.poly_global_market_id,
+                       c.cosine_similarity,
+                       v.match, v.confidence, v.resolution_divergence_risk,
+                       v.match_polarity, v.edge_case_flags, v.normalized_question,
+                       v.divergence_reason, v.reasoning,
+                       m1.title AS k_title, m2.title AS p_title,
+                       m1.yes_bid AS k_yes_bid, m1.yes_ask AS k_yes_ask,
+                       m2.yes_bid AS p_yes_bid, m2.yes_ask AS p_yes_ask
+            """ + base + tier_clauses.get(tier, "")
+            if flag_filter:
+                # Substring match on the JSON-encoded edge_case_flags
+                sql += " AND v.edge_case_flags LIKE ?"
+                params.append(f'%"{flag_filter}"%')
+            sql += " ORDER BY v.confidence DESC, c.cosine_similarity DESC"
+            sql += " LIMIT ? OFFSET ?"
+            params.extend([per_page, (page - 1) * per_page])
+            rows = conn.execute(sql, params).fetchall()
+
+            # Count total for pagination
+            count_sql = "SELECT COUNT(*) " + base + tier_clauses.get(tier, "")
+            count_params: list = []
+            if flag_filter:
+                count_sql += " AND v.edge_case_flags LIKE ?"
+                count_params.append(f'%"{flag_filter}"%')
+            total = conn.execute(count_sql, count_params).fetchone()[0]
+
+            # Flag-name distribution (only for review tier — most useful there)
+            flag_distribution: list[tuple[str, int]] = []
+            if tier == "review":
+                # JSON parsing in SQLite is slow; do it in Python
+                flag_count: dict[str, int] = {}
+                for r in conn.execute(
+                    "SELECT v.edge_case_flags " + base + tier_clauses["review"]
+                ):
+                    flags = json.loads(r["edge_case_flags"]) if r["edge_case_flags"] else []
+                    for f in flags:
+                        flag_count[f["name"]] = flag_count.get(f["name"], 0) + 1
+                flag_distribution = sorted(flag_count.items(), key=lambda x: -x[1])
+
+        # Hydrate edge_case_flags JSON for display
+        rows_h = []
+        for r in rows:
+            d = dict(r)
+            d["edge_case_flags_parsed"] = (
+                json.loads(d["edge_case_flags"]) if d["edge_case_flags"] else []
+            )
+            rows_h.append(d)
+
+        return render_template(
+            "queue_list.html",
+            rows=rows_h,
+            tier=tier,
+            flag_filter=flag_filter,
+            flag_distribution=flag_distribution,
+            page=page,
+            per_page=per_page,
+            total=total,
+            total_pages=(total + per_page - 1) // per_page,
+        )
+
+    @app.post("/bulk_action")
+    def bulk_action():
+        """Bulk approve/reject — applies to candidate_ids passed as a comma-
+        separated form field. Used by the queue_list page checkbox flow.
+        """
+        action = request.form.get("action", "")
+        ids_raw = request.form.get("candidate_ids", "")
+        tag = request.form.get("tag", "clean")
+        return_tier = request.form.get("tier", "review")
+        return_flag = request.form.get("flag", "")
+        return_page = request.form.get("page", "1")
+
+        if action not in ("approve", "reject"):
+            abort(400, "invalid action")
+        ids: list[int] = []
+        for tok in ids_raw.split(","):
+            tok = tok.strip()
+            if tok.isdigit():
+                ids.append(int(tok))
+        if not ids:
+            flash("No pairs selected.", "warning")
+            return redirect(url_for("queue_list", tier=return_tier,
+                                    flag=return_flag, page=return_page))
+
+        now_ts = int(time.time())
+        actor = request.form.get("user", "bulk-form")
+
+        with db() as conn:
+            with transaction(conn):
+                if action == "approve":
+                    if tag not in ("clean", "high_risk"):
+                        abort(400, "invalid tag")
+                    for cand_id in ids:
+                        cand = conn.execute(
+                            """
+                            SELECT c.*, v.resolution_divergence_risk,
+                                   v.normalized_question, v.match_polarity
+                            FROM candidate_pairs c
+                            JOIN pair_verdicts v ON v.id = (
+                                SELECT id FROM pair_verdicts pv
+                                WHERE pv.candidate_id = c.id
+                                ORDER BY pv.verdict_ts DESC, pv.id DESC LIMIT 1
+                            )
+                            WHERE c.id = ?
+                            """,
+                            (cand_id,),
+                        ).fetchone()
+                        if not cand:
+                            continue
+                        polarity = (cand["match_polarity"] or "unknown").lower()
+                        if polarity not in ("same", "inverse", "unknown"):
+                            polarity = "unknown"
+                        pair_id = f"{cand['kalshi_ticker']}__{cand['poly_global_market_id']}"[:120]
+                        conn.execute(
+                            """
+                            INSERT OR REPLACE INTO approved_pairs
+                            (pair_id, kalshi_ticker, poly_global_market_id,
+                             normalized_question, resolution_divergence_risk,
+                             match_polarity, tag, approved_by, approved_ts,
+                             active, notes)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
+                            """,
+                            (
+                                pair_id, cand["kalshi_ticker"],
+                                cand["poly_global_market_id"],
+                                cand["normalized_question"],
+                                cand["resolution_divergence_risk"],
+                                polarity, tag, actor, now_ts,
+                                f"bulk-approved from {return_tier} tier",
+                            ),
+                        )
+                else:  # reject
+                    reason = request.form.get("reason", "bulk-reject")
+                    for cand_id in ids:
+                        conn.execute(
+                            """
+                            INSERT OR REPLACE INTO rejected_pairs
+                            (candidate_id, rejected_by, rejected_ts, reason)
+                            VALUES (?, ?, ?, ?)
+                            """,
+                            (cand_id, actor, now_ts, reason),
+                        )
+
+        flash(f"{action.title()}d {len(ids)} pair(s)", "success")
+        return redirect(url_for("queue_list", tier=return_tier,
+                                flag=return_flag, page=return_page))
+
     @app.get("/stats")
     def stats():
         """Approval-rate-over-time + per-model + per-tier accuracy."""
