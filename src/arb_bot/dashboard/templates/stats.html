@@ -1,0 +1,98 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Approval stats</h1>
+
+<div class="row">
+  <div class="card">
+    <h3>Headline</h3>
+    <div class="kv">
+      <dt>Candidates total</dt><dd>{{ total_candidates }}</dd>
+      <dt>Approved</dt><dd>{{ total_approved }}</dd>
+      <dt>Rejected</dt><dd>{{ total_rejected }}</dd>
+      <dt>Approval rate</dt><dd><strong>{{ "%.1f%%" % (approval_rate * 100) }}</strong> of decided</dd>
+    </div>
+  </div>
+  <div class="card">
+    <h3>By LLM source (latest verdict)</h3>
+    <table>
+      <thead><tr><th>Model</th><th>Total</th><th>Approved</th><th>Rejected</th><th>Pending</th><th>Approval rate</th></tr></thead>
+      <tbody>
+      {% for m in by_model %}
+        <tr>
+          <td><code>{{ m.model }}</code></td>
+          <td>{{ m.total }}</td>
+          <td>{{ m.approved }}</td>
+          <td>{{ m.rejected }}</td>
+          <td>{{ m.pending }}</td>
+          <td>
+            {% if m.approved + m.rejected > 0 %}
+              {{ "%.1f%%" % (100.0 * m.approved / (m.approved + m.rejected)) }}
+            {% else %}—{% endif %}
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<div class="card">
+  <h3>Daily activity</h3>
+  <table>
+    <thead>
+      <tr>
+        <th>Day (UTC)</th>
+        <th style="text-align:right;">Approved (clean)</th>
+        <th style="text-align:right;">Approved (high_risk)</th>
+        <th style="text-align:right;">Rejected</th>
+        <th style="text-align:right;">Total</th>
+        <th>Bar (approve / reject)</th>
+      </tr>
+    </thead>
+    <tbody>
+    {% for day, counts in day_rows %}
+      <tr>
+        <td>{{ day }}</td>
+        <td style="text-align:right;">{{ counts.approved_clean }}</td>
+        <td style="text-align:right;">{{ counts.approved_high_risk }}</td>
+        <td style="text-align:right;">{{ counts.rejected }}</td>
+        <td style="text-align:right;"><strong>{{ counts.total }}</strong></td>
+        <td>
+          {% set total = counts.approved_clean + counts.approved_high_risk + counts.rejected %}
+          {% if total > 0 %}
+            {% set approved = counts.approved_clean + counts.approved_high_risk %}
+            {% set ap_pct = 100 * approved / total %}
+            {% set rj_pct = 100 - ap_pct %}
+            <div style="display:flex; height:14px; width:200px; border-radius:3px; overflow:hidden; border:1px solid var(--line);">
+              <div style="width:{{ ap_pct }}%; background:var(--ok);" title="approved {{ approved }}"></div>
+              <div style="width:{{ rj_pct }}%; background:var(--bad);" title="rejected {{ counts.rejected }}"></div>
+            </div>
+          {% endif %}
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+<div class="card">
+  <h3>Recent activity</h3>
+  <table>
+    <thead><tr><th>When</th><th>Action</th><th>Tag</th><th>Subject</th><th>By</th></tr></thead>
+    <tbody>
+    {% for r in recent %}
+      <tr>
+        <td class="muted">{{ r.ts }}</td>
+        <td>
+          {% if r.action == 'approved' %}<span class="pill pill-clean">approved</span>
+          {% else %}<span class="pill pill-high">rejected</span>{% endif %}
+        </td>
+        <td>{{ r.tag or '—' }}</td>
+        <td><code>{{ (r.subject or '')[:80] }}</code></td>
+        <td class="muted">{{ r.actor or '?' }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}

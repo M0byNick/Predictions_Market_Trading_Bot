@@ -257,6 +257,121 @@ def create_app() -> Flask:
             ).fetchall()
         return render_template("rejected.html", rows=rows)
 
+    @app.get("/stats")
+    def stats():
+        """Approval-rate-over-time + per-model + per-tier accuracy."""
+        with db() as conn:
+            # Daily rollup of approve / reject events (UTC)
+            daily = conn.execute("""
+                WITH events AS (
+                    SELECT date(approved_ts, 'unixepoch') AS day,
+                           tag, 'approved' AS action,
+                           approved_by AS actor
+                    FROM approved_pairs WHERE active = 1
+                    UNION ALL
+                    SELECT date(rejected_ts, 'unixepoch') AS day,
+                           NULL AS tag, 'rejected' AS action,
+                           rejected_by AS actor
+                    FROM rejected_pairs
+                )
+                SELECT day, action, tag, COUNT(*) AS n
+                FROM events
+                GROUP BY day, action, tag
+                ORDER BY day DESC
+            """).fetchall()
+
+            # Aggregate: by-day approvals / rejections / clean-vs-high
+            by_day: dict[str, dict[str, int]] = {}
+            for r in daily:
+                d = r["day"] or "(unknown)"
+                if d not in by_day:
+                    by_day[d] = {
+                        "approved_clean": 0, "approved_high_risk": 0,
+                        "rejected": 0, "total": 0,
+                    }
+                if r["action"] == "approved":
+                    if r["tag"] == "clean":
+                        by_day[d]["approved_clean"] += r["n"]
+                    else:
+                        by_day[d]["approved_high_risk"] += r["n"]
+                else:
+                    by_day[d]["rejected"] += r["n"]
+                by_day[d]["total"] += r["n"]
+            day_rows = sorted(by_day.items(), reverse=True)
+
+            # Approval rate by source LLM model (which model surfaced the verdict?)
+            by_model = conn.execute("""
+                WITH latest_verdict AS (
+                    SELECT v.candidate_id, v.model
+                    FROM pair_verdicts v
+                    JOIN (
+                        SELECT candidate_id, MAX(verdict_ts) AS ts
+                        FROM pair_verdicts GROUP BY candidate_id
+                    ) t ON t.candidate_id = v.candidate_id AND t.ts = v.verdict_ts
+                ),
+                outcomes AS (
+                    SELECT lv.candidate_id, lv.model,
+                        CASE
+                            WHEN a.pair_id IS NOT NULL THEN 'approved'
+                            WHEN r.candidate_id IS NOT NULL THEN 'rejected'
+                            ELSE 'pending'
+                        END AS outcome
+                    FROM latest_verdict lv
+                    JOIN candidate_pairs c ON c.id = lv.candidate_id
+                    LEFT JOIN approved_pairs a
+                      ON a.kalshi_ticker = c.kalshi_ticker
+                     AND a.poly_global_market_id = c.poly_global_market_id
+                    LEFT JOIN rejected_pairs r ON r.candidate_id = lv.candidate_id
+                )
+                SELECT model,
+                    COUNT(*) AS total,
+                    SUM(CASE WHEN outcome='approved' THEN 1 ELSE 0 END) AS approved,
+                    SUM(CASE WHEN outcome='rejected' THEN 1 ELSE 0 END) AS rejected,
+                    SUM(CASE WHEN outcome='pending'  THEN 1 ELSE 0 END) AS pending
+                FROM outcomes
+                GROUP BY model
+                ORDER BY total DESC
+            """).fetchall()
+
+            # Latest activity (last 30 actions across approve+reject)
+            recent = conn.execute("""
+                SELECT * FROM (
+                    SELECT 'approved' AS action, approved_ts AS ts,
+                           pair_id AS subject, tag, approved_by AS actor
+                    FROM approved_pairs WHERE active = 1
+                    UNION ALL
+                    SELECT 'rejected' AS action, rejected_ts AS ts,
+                           CAST(candidate_id AS TEXT) AS subject,
+                           NULL AS tag, rejected_by AS actor
+                    FROM rejected_pairs
+                )
+                ORDER BY ts DESC LIMIT 30
+            """).fetchall()
+
+            # Headline numbers
+            total_candidates = conn.execute(
+                "SELECT COUNT(*) FROM candidate_pairs"
+            ).fetchone()[0]
+            total_approved = conn.execute(
+                "SELECT COUNT(*) FROM approved_pairs WHERE active=1"
+            ).fetchone()[0]
+            total_rejected = conn.execute(
+                "SELECT COUNT(*) FROM rejected_pairs"
+            ).fetchone()[0]
+            decided = total_approved + total_rejected
+            approval_rate = total_approved / max(1, decided)
+
+        return render_template(
+            "stats.html",
+            day_rows=day_rows,
+            by_model=by_model,
+            recent=recent,
+            total_candidates=total_candidates,
+            total_approved=total_approved,
+            total_rejected=total_rejected,
+            approval_rate=approval_rate,
+        )
+
     @app.get("/market/<venue>/<path:market_id>")
     def market_detail(venue: str, market_id: str):
         if venue not in ("kalshi", "poly_global"):
