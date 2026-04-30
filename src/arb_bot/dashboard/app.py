@@ -46,14 +46,25 @@ def create_app() -> Flask:
                     "SELECT COUNT(*) FROM approved_pairs WHERE active=1 AND tag='high_risk'"
                 ).fetchone()[0],
                 "rejected_total": conn.execute("SELECT COUNT(*) FROM rejected_pairs").fetchone()[0],
+                # Pending = candidates with a verdict but not yet approved or
+                # rejected. Joins on the LATEST verdict so we count each
+                # candidate once even if it has multiple verdicts (Sonnet +
+                # Opus, etc.). Limited to match=yes since match=no is
+                # functionally rejected by the LLM and shouldn't appear in
+                # human-review queues.
                 "pending": conn.execute(
                     """
                     SELECT COUNT(*) FROM candidate_pairs c
-                    JOIN pair_verdicts v ON v.candidate_id = c.id
+                    JOIN pair_verdicts v ON v.id = (
+                        SELECT id FROM pair_verdicts pv
+                        WHERE pv.candidate_id = c.id
+                        ORDER BY pv.verdict_ts DESC, pv.id DESC LIMIT 1
+                    )
                     LEFT JOIN approved_pairs a
                       ON a.kalshi_ticker=c.kalshi_ticker AND a.poly_global_market_id=c.poly_global_market_id
                     LEFT JOIN rejected_pairs r ON r.candidate_id=c.id
                     WHERE a.pair_id IS NULL AND r.candidate_id IS NULL
+                      AND v.match IN ('yes', 'ambiguous')
                     """
                 ).fetchone()[0],
             }
@@ -66,11 +77,17 @@ def create_app() -> Flask:
         #   "review"  = match=yes, risk in (none,low), HAS edge_case_flags (review carefully)
         #   "ambig"   = match=ambiguous
         #   "all"     = everything pending (default)
+        # Uses LATEST verdict per candidate (across all models) so Opus
+        # verdicts override earlier Sonnet ones where present.
         tier = request.args.get("tier", "safest")
         with db() as conn:
             base = """
                 FROM candidate_pairs c
-                JOIN pair_verdicts v ON v.candidate_id = c.id
+                JOIN pair_verdicts v ON v.id = (
+                    SELECT id FROM pair_verdicts pv
+                    WHERE pv.candidate_id = c.id
+                    ORDER BY pv.verdict_ts DESC, pv.id DESC LIMIT 1
+                )
                 LEFT JOIN approved_pairs a
                   ON a.kalshi_ticker = c.kalshi_ticker AND a.poly_global_market_id = c.poly_global_market_id
                 LEFT JOIN rejected_pairs r ON r.candidate_id = c.id
@@ -143,9 +160,12 @@ def create_app() -> Flask:
                 SELECT c.*, v.resolution_divergence_risk, v.normalized_question,
                        v.match_polarity
                 FROM candidate_pairs c
-                JOIN pair_verdicts v ON v.candidate_id = c.id
+                JOIN pair_verdicts v ON v.id = (
+                    SELECT id FROM pair_verdicts pv
+                    WHERE pv.candidate_id = c.id
+                    ORDER BY pv.verdict_ts DESC, pv.id DESC LIMIT 1
+                )
                 WHERE c.id = ?
-                ORDER BY v.verdict_ts DESC LIMIT 1
                 """,
                 (candidate_id,),
             ).fetchone()

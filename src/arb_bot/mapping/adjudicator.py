@@ -79,6 +79,28 @@ CLASSIFICATION EDGE CASES (RECURRENT BUGS — be especially careful):
    Kalshi often voids; Polymarket often resolves on official ruling. This breaks arbs even
    when the questions are otherwise identical.
 
+10. CHAMBER CONTROL: SPEAKER vs CONSENSUS
+    Kalshi resolves "control of the House/Senate" markets STRICTLY on the Speaker's (or
+    Majority Leader's) party affiliation as of a specific date (e.g. Feb 1, 2027).
+    Polymarket primarily resolves on press-consensus of majority, falling back to Speaker
+    only as a tiebreaker. In tight/contested margins or a Speaker caucus-switch these CAN
+    settle differently. Always rate chamber-control pairs as risk=medium minimum, and
+    risk=high when Independents are likely to be pivotal.
+
+11. OFFICIAL REPLACEMENT / DEPARTURE
+    "Will [official] leave / be replaced / resign before [date]?" — venues differ on
+    interim/acting officials, resignations-pending-confirmation, fired-but-litigating.
+    Verify both resolution criteria specify the same trigger event.
+
+12. CONTESTED-RESULT TIMING
+    Tight elections with recounts or court challenges can settle before/after the date a
+    venue uses to "call" the result. Different cutoff dates → different settlements.
+
+13. SPORTS FORMAT EDGE CASES
+    Walkovers (Polymarket usually resolves; Kalshi sometimes voids), best-of-N truncation,
+    abandoned matches, overtime / penalty / shootout / tiebreak resolution. Set risk=medium
+    on tennis / esports / NHL / NBA-overtime markets unless venues' rules align explicitly.
+
 When ANY of these patterns apply, the floor for resolution_divergence_risk is "medium",
 and "high" if resolution criteria on each side don't explicitly resolve the ambiguity.
 """
@@ -356,25 +378,22 @@ def collect_batch_results(conn: sqlite3.Connection, cfg: Config, batch_id: str) 
     api_failures: list[str] = []
     skipped_existing = 0
 
-    # Pre-seed which (candidate_id, model) pairs are already in pair_verdicts
-    existing = {
-        (r["candidate_id"], r["model"])
-        for r in conn.execute(
-            "SELECT candidate_id, model FROM pair_verdicts WHERE model = ?",
-            (cfg.anthropic_model,),
-        )
-    }
-
+    # No dedupe by (cand, model). pair_verdicts is intentionally append-only:
+    # multiple verdicts per (candidate, model) keyed by verdict_ts encode
+    # the model's evolution over re-batches with new prompts. Downstream
+    # consumers (dashboard, compare_models, edge_cases) all select the
+    # latest verdict per (candidate, model) via MAX(verdict_ts).
     rows_to_write: list[tuple] = []
     for result in client.messages.batches.results(batch_id):
         if result.result.type != "succeeded":
             api_failures.append(result.custom_id)
             continue
         cand_id = int(result.custom_id.removeprefix("cand-"))
-        if (cand_id, cfg.anthropic_model) in existing:
-            skipped_existing += 1
-            continue
         msg = result.result.message
+        # Use the actual model that produced this verdict (per Anthropic's
+        # response). DON'T fall back to cfg.anthropic_model — that field
+        # might be totally different from the batch model.
+        result_model = getattr(msg, "model", None) or cfg.anthropic_model
         text = "".join(b.text for b in msg.content if hasattr(b, "text"))
         try:
             verdict = _parse_verdict(text)
@@ -394,7 +413,7 @@ def collect_batch_results(conn: sqlite3.Connection, cfg: Config, batch_id: str) 
                 verdict.divergence_reason,
                 verdict.normalized_question,
                 verdict.reasoning,
-                cfg.anthropic_model,
+                result_model,
                 int(time.time()),
             )
         )

@@ -185,6 +185,61 @@ EDGE_PATTERNS: tuple[EdgePattern, ...] = (
         ),
         auto_downgrade_to_high=True,  # this one is mathematically broken
     ),
+    # 2026-04-30: Discovered by Opus 4.7 cross-model audit. Kalshi resolves
+    # chamber-control markets strictly on Speaker's party affiliation as of
+    # a specific date (e.g. Feb 1, 2027). Polymarket primarily resolves on
+    # press-consensus of majority, falling back to Speaker only as a
+    # tiebreaker. In tight/contested margins or a Speaker who switches
+    # caucus mid-term, these CAN settle to opposite outcomes.
+    EdgePattern(
+        name="chamber_control_speaker_vs_consensus",
+        regex=r"\b(control|controls|controlled|win|wins|hold|holds|majority)\b.*\b(house|senate|congress|chamber)\b",
+        why=(
+            "Chamber-control markets: Kalshi resolves on Speaker's party at "
+            "a specific date; Polymarket on press-consensus majority. In "
+            "close margins or Speaker caucus-switches these diverge. "
+            "Auto-escalated to risk=high until reviewer confirms both "
+            "venues use the same resolution authority."
+        ),
+        auto_downgrade_to_high=True,
+    ),
+    # 2026-04-30: Opus flagged 'replacement' as a recurring divergence
+    # category. Kalshi/Poly handle resignations vs firings vs interim
+    # acting officials differently for "leaves position by X" markets.
+    EdgePattern(
+        name="replacement_eligibility",
+        regex=r"\b(replace|replaced|replacement|resign|resignation|fired|removed|leaves?|leaving|step\s*down|stepping\s*down)\b",
+        why=(
+            "Replacement / departure markets: venues differ on whether an "
+            "interim/acting official, resignation-but-not-yet-confirmed-"
+            "successor, or fired-but-litigating counts as 'left'. Verify "
+            "both venues' resolution criteria specify the same trigger."
+        ),
+        auto_downgrade_to_high=False,
+    ),
+    # 2026-04-30: Opus flagged 'contested' close-race scenarios.
+    EdgePattern(
+        name="contested_election",
+        regex=r"\b(contested|recount|recounts|disputed|legal\s+challenge|court\s+challenge|certif)",
+        why=(
+            "Contested/close-race election: recounts, court challenges, and "
+            "delayed certification can resolve before official-call dates. "
+            "Venues with different cutoff dates can settle differently."
+        ),
+        auto_downgrade_to_high=False,
+    ),
+    # 2026-04-30: Sport-specific resolution window patterns Opus called out.
+    EdgePattern(
+        name="game_walkover_or_extended_format",
+        regex=r"\b(walkover|forfeit|abandon|abandoned|>7|best.of.\d|bo\d|overtime|tiebreak)\b",
+        why=(
+            "Sports format/handling: best-of-N truncation, walkovers, "
+            "abandoned matches, or overtime/tiebreak resolution can diverge "
+            "across venues. Especially common in tennis (Polymarket "
+            "resolves walkovers; Kalshi sometimes voids) and esports."
+        ),
+        auto_downgrade_to_high=False,
+    ),
     EdgePattern(
         name="seat_count_by_party",
         regex=r"\b(democrat\w*|republican\w*)\s+\w*\s*(party\s+)?(hold|wins|gets|takes)\b.*\b\d{2,3}\b.*\b(seat|seats)\b",
