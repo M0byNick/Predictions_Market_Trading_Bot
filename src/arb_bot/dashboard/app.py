@@ -8,6 +8,57 @@ from flask import Flask, abort, flash, redirect, render_template, request, url_f
 from arb_bot.config import load_config
 from arb_bot.db import connect, init_schema, transaction
 
+
+def _decision_snapshot(conn, candidate_id: int) -> tuple[int | None, str]:
+    """Build a JSON snapshot of the latest verdict + relevant context.
+
+    Returns (verdict_id, json_str). Used at approve/reject time so /learn
+    can see exactly what the reviewer saw at the moment of the decision,
+    even after later re-adjudications change the latest verdict.
+    """
+    row = conn.execute(
+        """
+        SELECT v.id AS verdict_id, v.match, v.confidence,
+               v.resolution_aligned, v.resolution_divergence_risk,
+               v.match_polarity, v.divergence_reason,
+               v.normalized_question, v.reasoning, v.model,
+               v.edge_case_flags, v.edge_case_downgraded,
+               c.cosine_similarity, c.kalshi_ticker, c.poly_global_market_id,
+               m1.title AS k_title, m2.title AS p_title
+        FROM candidate_pairs c
+        JOIN pair_verdicts v ON v.id = (
+            SELECT id FROM pair_verdicts pv
+            WHERE pv.candidate_id = c.id
+            ORDER BY pv.verdict_ts DESC, pv.id DESC LIMIT 1
+        )
+        JOIN markets m1 ON m1.venue='kalshi' AND m1.venue_market_id=c.kalshi_ticker
+        JOIN markets m2 ON m2.venue='poly_global' AND m2.venue_market_id=c.poly_global_market_id
+        WHERE c.id = ?
+        """,
+        (candidate_id,),
+    ).fetchone()
+    if not row:
+        return None, json.dumps({})
+    flags = []
+    try:
+        if row["edge_case_flags"]:
+            flags = [f.get("name") for f in json.loads(row["edge_case_flags"])]
+    except Exception:
+        pass
+    snap = {
+        "model": row["model"],
+        "match": row["match"],
+        "confidence": row["confidence"],
+        "risk": row["resolution_divergence_risk"],
+        "polarity": row["match_polarity"],
+        "edge_case_flag_names": flags,
+        "edge_case_downgraded": bool(row["edge_case_downgraded"]),
+        "cosine_similarity": row["cosine_similarity"],
+        "k_title": row["k_title"],
+        "p_title": row["p_title"],
+    }
+    return row["verdict_id"], json.dumps(snap, ensure_ascii=False)
+
 log = logging.getLogger(__name__)
 
 
@@ -175,14 +226,15 @@ def create_app() -> Flask:
             if polarity not in ("same", "inverse", "unknown"):
                 polarity = "unknown"
             pair_id = f"{cand['kalshi_ticker']}__{cand['poly_global_market_id']}"[:120]
+            verdict_id, ctx = _decision_snapshot(conn, candidate_id)
             with transaction(conn):
                 conn.execute(
                     """
                     INSERT OR REPLACE INTO approved_pairs
                     (pair_id, kalshi_ticker, poly_global_market_id, normalized_question,
                      resolution_divergence_risk, match_polarity, tag, approved_by,
-                     approved_ts, active, notes)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
+                     approved_ts, active, notes, verdict_id, decision_context)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
                     """,
                     (
                         pair_id,
@@ -195,6 +247,8 @@ def create_app() -> Flask:
                         request.form.get("user", "nick"),
                         int(time.time()),
                         notes,
+                        verdict_id,
+                        ctx,
                     ),
                 )
         flash(f"Approved {pair_id} as {tag} (polarity={polarity})", "success")
@@ -204,18 +258,22 @@ def create_app() -> Flask:
     def reject(candidate_id: int):
         reason = request.form.get("reason", "")
         with db() as conn:
+            verdict_id, ctx = _decision_snapshot(conn, candidate_id)
             with transaction(conn):
                 conn.execute(
                     """
                     INSERT OR REPLACE INTO rejected_pairs
-                    (candidate_id, rejected_by, rejected_ts, reason)
-                    VALUES (?, ?, ?, ?)
+                    (candidate_id, rejected_by, rejected_ts, reason,
+                     verdict_id, decision_context)
+                    VALUES (?, ?, ?, ?, ?, ?)
                     """,
                     (
                         candidate_id,
                         request.form.get("user", "nick"),
                         int(time.time()),
                         reason,
+                        verdict_id,
+                        ctx,
                     ),
                 )
         flash(f"Rejected candidate #{candidate_id}", "warning")
@@ -408,14 +466,15 @@ def create_app() -> Flask:
                         if polarity not in ("same", "inverse", "unknown"):
                             polarity = "unknown"
                         pair_id = f"{cand['kalshi_ticker']}__{cand['poly_global_market_id']}"[:120]
+                        verdict_id, ctx = _decision_snapshot(conn, cand_id)
                         conn.execute(
                             """
                             INSERT OR REPLACE INTO approved_pairs
                             (pair_id, kalshi_ticker, poly_global_market_id,
                              normalized_question, resolution_divergence_risk,
                              match_polarity, tag, approved_by, approved_ts,
-                             active, notes)
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
+                             active, notes, verdict_id, decision_context)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
                             """,
                             (
                                 pair_id, cand["kalshi_ticker"],
@@ -424,18 +483,21 @@ def create_app() -> Flask:
                                 cand["resolution_divergence_risk"],
                                 polarity, tag, actor, now_ts,
                                 f"bulk-approved from {return_tier} tier",
+                                verdict_id, ctx,
                             ),
                         )
                 else:  # reject
                     reason = request.form.get("reason", "bulk-reject")
                     for cand_id in ids:
+                        verdict_id, ctx = _decision_snapshot(conn, cand_id)
                         conn.execute(
                             """
                             INSERT OR REPLACE INTO rejected_pairs
-                            (candidate_id, rejected_by, rejected_ts, reason)
-                            VALUES (?, ?, ?, ?)
+                            (candidate_id, rejected_by, rejected_ts, reason,
+                             verdict_id, decision_context)
+                            VALUES (?, ?, ?, ?, ?, ?)
                             """,
-                            (cand_id, actor, now_ts, reason),
+                            (cand_id, actor, now_ts, reason, verdict_id, ctx),
                         )
 
         flash(f"{action.title()}d {len(ids)} pair(s)", "success")
@@ -555,6 +617,99 @@ def create_app() -> Flask:
             total_approved=total_approved,
             total_rejected=total_rejected,
             approval_rate=approval_rate,
+        )
+
+    @app.get("/learn")
+    def learn():
+        """Pattern analysis: what attributes correlate with approve vs reject?"""
+        with db() as conn:
+            # Pull every decision (approve + reject) with its snapshot
+            decisions = []
+            for r in conn.execute(
+                "SELECT 'approve' AS outcome, tag, decision_context, approved_ts AS ts "
+                "FROM approved_pairs WHERE active=1 AND decision_context IS NOT NULL"
+            ):
+                decisions.append((r["outcome"], r["tag"], r["decision_context"], r["ts"]))
+            for r in conn.execute(
+                "SELECT 'reject' AS outcome, NULL AS tag, decision_context, rejected_ts AS ts "
+                "FROM rejected_pairs WHERE decision_context IS NOT NULL"
+            ):
+                decisions.append((r["outcome"], r["tag"], r["decision_context"], r["ts"]))
+
+        # Aggregate by attribute
+        from collections import defaultdict
+        # (attr_value) -> {approve, reject}
+        by_flag: dict[str, dict[str, int]] = defaultdict(lambda: {"approve": 0, "reject": 0})
+        by_risk: dict[str, dict[str, int]] = defaultdict(lambda: {"approve": 0, "reject": 0})
+        by_polarity: dict[str, dict[str, int]] = defaultdict(lambda: {"approve": 0, "reject": 0})
+        by_match: dict[str, dict[str, int]] = defaultdict(lambda: {"approve": 0, "reject": 0})
+        by_model: dict[str, dict[str, int]] = defaultdict(lambda: {"approve": 0, "reject": 0})
+        by_cosine_bucket: dict[str, dict[str, int]] = defaultdict(lambda: {"approve": 0, "reject": 0})
+        by_confidence_bucket: dict[str, dict[str, int]] = defaultdict(lambda: {"approve": 0, "reject": 0})
+        by_tag: dict[str, dict[str, int]] = defaultdict(lambda: {"approve": 0, "reject": 0})
+
+        n_approved = 0
+        n_rejected = 0
+        for outcome, tag, ctx_json, _ts in decisions:
+            try:
+                ctx = json.loads(ctx_json or "{}")
+            except Exception:
+                continue
+            if outcome == "approve":
+                n_approved += 1
+                if tag:
+                    by_tag[tag][outcome] += 1
+            else:
+                n_rejected += 1
+            risk = ctx.get("risk", "?") or "?"
+            polarity = ctx.get("polarity", "?") or "?"
+            match = ctx.get("match", "?") or "?"
+            model = ctx.get("model", "?") or "?"
+            conf = ctx.get("confidence")
+            cos = ctx.get("cosine_similarity")
+            flags = ctx.get("edge_case_flag_names") or []
+            by_risk[risk][outcome] += 1
+            by_polarity[polarity][outcome] += 1
+            by_match[match][outcome] += 1
+            by_model[model][outcome] += 1
+            if conf is not None:
+                bucket = f"{int(conf * 10) * 10}-{int(conf * 10) * 10 + 10}%"
+                by_confidence_bucket[bucket][outcome] += 1
+            if cos is not None:
+                bucket = f"{int(cos * 20) / 20:.2f}-{int(cos * 20) / 20 + 0.05:.2f}"
+                by_cosine_bucket[bucket][outcome] += 1
+            if not flags:
+                by_flag["(none)"][outcome] += 1
+            else:
+                for f in flags:
+                    by_flag[f][outcome] += 1
+
+        def _to_table(d: dict) -> list[dict]:
+            out = []
+            for k, v in d.items():
+                total = v["approve"] + v["reject"]
+                rate = v["approve"] / total if total else 0
+                out.append({
+                    "key": k,
+                    "approve": v["approve"],
+                    "reject": v["reject"],
+                    "total": total,
+                    "approval_rate": rate,
+                })
+            return sorted(out, key=lambda x: -x["total"])
+
+        return render_template(
+            "learn.html",
+            n_approved=n_approved,
+            n_rejected=n_rejected,
+            by_flag=_to_table(by_flag),
+            by_risk=_to_table(by_risk),
+            by_polarity=_to_table(by_polarity),
+            by_match=_to_table(by_match),
+            by_model=_to_table(by_model),
+            by_cosine_bucket=sorted(_to_table(by_cosine_bucket), key=lambda x: x["key"]),
+            by_confidence_bucket=sorted(_to_table(by_confidence_bucket), key=lambda x: x["key"]),
+            by_tag=_to_table(by_tag),
         )
 
     @app.get("/market/<venue>/<path:market_id>")

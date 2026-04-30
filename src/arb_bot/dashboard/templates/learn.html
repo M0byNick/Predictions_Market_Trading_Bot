@@ -1,0 +1,74 @@
+{% extends "base.html" %}
+
+{% macro rate_bar(rate, n) %}
+  {% set pct = (rate * 100) | round(0, 'floor') | int %}
+  <div style="display:flex; align-items:center; gap:8px;">
+    <div style="width:120px; height:12px; border:1px solid var(--line); border-radius:2px; overflow:hidden;">
+      <div style="width:{{ pct }}%; height:100%; background:{% if pct >= 70 %}var(--ok){% elif pct >= 40 %}var(--warn){% else %}var(--bad){% endif %};"></div>
+    </div>
+    <span style="font-variant-numeric: tabular-nums; font-size:13px;">{{ pct }}% ({{ n }})</span>
+  </div>
+{% endmacro %}
+
+{% macro tbl(title, rows, key_label) %}
+<div class="card">
+  <h3>{{ title }}</h3>
+  {% if rows %}
+  <table>
+    <thead>
+      <tr>
+        <th>{{ key_label }}</th>
+        <th style="text-align:right;">Approved</th>
+        <th style="text-align:right;">Rejected</th>
+        <th style="text-align:right;">Total</th>
+        <th>Approval rate</th>
+      </tr>
+    </thead>
+    <tbody>
+    {% for r in rows %}
+      <tr>
+        <td><code>{{ r.key }}</code></td>
+        <td style="text-align:right;">{{ r.approve }}</td>
+        <td style="text-align:right;">{{ r.reject }}</td>
+        <td style="text-align:right;">{{ r.total }}</td>
+        <td>{{ rate_bar(r.approval_rate, r.total) }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+    <p class="muted">No data yet — start approving/rejecting to populate this analysis.</p>
+  {% endif %}
+</div>
+{% endmacro %}
+
+{% block content %}
+<h1>Learn — pattern analysis from your decisions</h1>
+
+<div class="card">
+  <p>
+    Every approve/reject snapshots the verdict context (LLM model, risk level,
+    polarity, edge-case flags, confidence, cosine similarity). This page rolls
+    that up so you can see <strong>which attributes correlate with your
+    approvals</strong>. Categories with extreme approval rates (near 0% or
+    near 100%) are candidates for auto-classification — let me know and we
+    can add a "smart queue" that pre-filters new pairs by the patterns you've
+    been approving.
+  </p>
+  <p>
+    <strong>Total decisions:</strong> {{ n_approved }} approved, {{ n_rejected }} rejected
+    {% if n_approved + n_rejected > 0 %}
+      ({{ "%.1f%%" % (100 * n_approved / (n_approved + n_rejected)) }} overall approval rate)
+    {% endif %}
+  </p>
+</div>
+
+{{ tbl("By edge-case pattern", by_flag, "pattern") }}
+{{ tbl("By LLM verdict (match)", by_match, "match") }}
+{{ tbl("By risk level", by_risk, "risk") }}
+{{ tbl("By polarity", by_polarity, "polarity") }}
+{{ tbl("By LLM source model", by_model, "model") }}
+{{ tbl("By approve tag", by_tag, "tag (clean / high_risk)") }}
+{{ tbl("By cosine-similarity bucket", by_cosine_bucket, "bucket") }}
+{{ tbl("By LLM confidence bucket", by_confidence_bucket, "bucket") }}
+{% endblock %}

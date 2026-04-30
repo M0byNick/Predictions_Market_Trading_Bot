@@ -79,6 +79,12 @@ CREATE TABLE IF NOT EXISTS approved_pairs (
     approved_ts INTEGER NOT NULL,
     active INTEGER NOT NULL DEFAULT 1,
     notes TEXT,
+    -- Decision-context snapshot: pin the verdict the reviewer saw at the
+    -- moment of approval, plus a JSON blob of the relevant fields. Lets
+    -- /learn analyze "what attributes correlate with approval?" without
+    -- being confused by later re-adjudications.
+    verdict_id INTEGER,
+    decision_context TEXT,  -- JSON: {model, match, confidence, risk, polarity, edge_case_flags, cosine}
     UNIQUE (kalshi_ticker, poly_global_market_id)
 );
 
@@ -89,6 +95,11 @@ CREATE TABLE IF NOT EXISTS rejected_pairs (
     rejected_by TEXT,
     rejected_ts INTEGER NOT NULL,
     reason TEXT,
+    -- Decision-context snapshot, mirrored from approved_pairs. Lets /learn
+    -- compute approval rates by attribute (e.g., "you reject 95% of
+    -- chamber_control pairs but approve 90% of game_void_rules").
+    verdict_id INTEGER,
+    decision_context TEXT,
     FOREIGN KEY (candidate_id) REFERENCES candidate_pairs(id)
 );
 
@@ -165,6 +176,15 @@ def init_schema(db_path: Path) -> None:
                 "ALTER TABLE approved_pairs "
                 "ADD COLUMN match_polarity TEXT NOT NULL DEFAULT 'unknown'"
             )
+        if "verdict_id" not in approved_cols:
+            conn.execute("ALTER TABLE approved_pairs ADD COLUMN verdict_id INTEGER")
+        if "decision_context" not in approved_cols:
+            conn.execute("ALTER TABLE approved_pairs ADD COLUMN decision_context TEXT")
+        rejected_cols = {r["name"] for r in conn.execute("PRAGMA table_info(rejected_pairs)")}
+        if "verdict_id" not in rejected_cols:
+            conn.execute("ALTER TABLE rejected_pairs ADD COLUMN verdict_id INTEGER")
+        if "decision_context" not in rejected_cols:
+            conn.execute("ALTER TABLE rejected_pairs ADD COLUMN decision_context TEXT")
         conn.commit()
 
 
