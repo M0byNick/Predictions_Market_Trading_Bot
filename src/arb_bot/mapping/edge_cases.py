@@ -28,6 +28,142 @@ from typing import Iterable
 log = logging.getLogger(__name__)
 
 
+# ---------------------------------------------------------------------------
+# Match-polarity heuristics
+# ---------------------------------------------------------------------------
+# Pairs where Kalshi YES and Polymarket YES describe COMPLEMENTARY outcomes
+# (e.g. "Will Dems win Arizona governor?" vs "Will Reps win Arizona governor?")
+# need different arb math than same-polarity pairs. We detect them with
+# a small set of heuristics based on title text.
+
+_PARTY_DEM = re.compile(r"\b(democrat\w*|dem\b|dems\b|democrat\s+party)\b", re.I)
+_PARTY_REP = re.compile(r"\b(republican\w*|rep\b|reps\b|gop\b|republican\s+party)\b", re.I)
+
+
+_OFFICE_WORDS = {
+    "governor", "governorship", "senator", "senate", "house", "president",
+    "mayor", "ag", "secretary", "controller", "treasurer",
+}
+# Map common variants to a canonical token so "governorship" matches "governor"
+_TOKEN_NORMALIZE = {
+    "governorship": "governor",
+    "senatorial": "senate",
+    "senators": "senate",
+    "presidential": "president",
+}
+
+# All 50 US state names (lowercase, single-word states + multi-word) for
+# anchoring "is this about the same race?" decisions.
+_STATES = set("""
+alabama alaska arizona arkansas california colorado connecticut delaware
+florida georgia hawaii idaho illinois indiana iowa kansas kentucky louisiana
+maine maryland massachusetts michigan minnesota mississippi missouri montana
+nebraska nevada ohio oklahoma oregon pennsylvania rhode tennessee texas utah
+vermont virginia washington wisconsin wyoming new-hampshire new-jersey
+new-mexico new-york north-carolina north-dakota south-carolina south-dakota
+west-virginia
+""".split())
+
+
+def _normalize_state_or_race(s: str) -> set[str]:
+    """Tokenize and normalize so that we can compare whether two markets are
+    about the same race even when they differ on the party clause."""
+    if not s:
+        return set()
+    s = s.lower()
+    # Multi-word state names → single hyphenated token
+    s = re.sub(r"\bnew\s+(hampshire|jersey|mexico|york)\b", r"new-\1", s)
+    s = re.sub(r"\b(north|south)\s+(carolina|dakota)\b", r"\1-\2", s)
+    s = re.sub(r"\bwest\s+virginia\b", "west-virginia", s)
+    s = re.sub(r"\brhode\s+island\b", "rhode-island", s)
+    # Drop noise words
+    s = re.sub(
+        r"\b(will|the|in|race|win|wins|winning|won|nominee|for|of|to|"
+        r"a|an|be|by|when|who|how|what|do|does|did|2025|2026|2027|2028)\b",
+        " ", s,
+    )
+    # Drop party words
+    s = re.sub(r"\b(party|democrat\w*|republican\w*|dem|rep|gop|dems|reps)\b", " ", s)
+    # Punctuation
+    s = re.sub(r"[^\w\s\-]", " ", s)
+    tokens = [t for t in s.split() if len(t) > 1]
+    # Canonical normalization
+    tokens = [_TOKEN_NORMALIZE.get(t, t) for t in tokens]
+    return set(tokens)
+
+
+def detect_polarity(k_title: str | None, p_title: str | None) -> str:
+    """Return 'same' | 'inverse' | 'unknown'.
+
+    Rules (cheap; LLM also outputs match_polarity for new batches):
+      * If one title mentions Democrats/Dems and the other mentions
+        Republicans/GOP, AND the rest of the titles strip-to similar
+        anchors, mark inverse.
+      * If both titles mention the same party, mark same.
+      * Otherwise unknown — leave to the LLM.
+    """
+    if not k_title or not p_title:
+        return "unknown"
+    k_dem = bool(_PARTY_DEM.search(k_title))
+    k_rep = bool(_PARTY_REP.search(k_title))
+    p_dem = bool(_PARTY_DEM.search(p_title))
+    p_rep = bool(_PARTY_REP.search(p_title))
+
+    if (k_dem and p_rep and not k_rep and not p_dem) or (k_rep and p_dem and not k_dem and not p_rep):
+        # Different parties — inverse if the markets share a state OR an
+        # office word (governor/senate/etc) AFTER stripping party words.
+        ta = _normalize_state_or_race(k_title)
+        tb = _normalize_state_or_race(p_title)
+        if ta and tb:
+            shared = ta & tb
+            shared_state = bool(shared & _STATES)
+            shared_office = bool(shared & _OFFICE_WORDS)
+            # Jaccard fallback for cases without state/office overlap
+            jacc = len(shared) / max(1, len(ta | tb))
+            if shared_state or shared_office or jacc >= 0.30:
+                return "inverse"
+    if (k_dem and p_dem and not k_rep and not p_rep) or (k_rep and p_rep and not k_dem and not p_dem):
+        return "same"
+    return "unknown"
+
+
+def backfill_polarity(conn: sqlite3.Connection) -> tuple[int, int]:
+    """Run polarity detection over verdicts whose match='yes' and polarity is
+    still 'unknown'. Returns (n_marked_inverse, n_marked_same).
+
+    This only fills in heuristically-confident polarity calls; ambiguous
+    pairs stay at 'unknown' and the LLM (or a re-batch) will decide later.
+    """
+    rows = conn.execute("""
+        SELECT v.id, m1.title AS k_title, m2.title AS p_title
+        FROM pair_verdicts v
+        JOIN candidate_pairs c ON c.id = v.candidate_id
+        JOIN markets m1 ON m1.venue='kalshi' AND m1.venue_market_id=c.kalshi_ticker
+        JOIN markets m2 ON m2.venue='poly_global' AND m2.venue_market_id=c.poly_global_market_id
+        WHERE v.match = 'yes' AND v.match_polarity = 'unknown'
+    """).fetchall()
+    n_inverse = 0
+    n_same = 0
+    updates: list[tuple] = []
+    for r in rows:
+        pol = detect_polarity(r["k_title"], r["p_title"])
+        if pol == "inverse":
+            n_inverse += 1
+            updates.append((pol, r["id"]))
+        elif pol == "same":
+            n_same += 1
+            updates.append((pol, r["id"]))
+    conn.executemany(
+        "UPDATE pair_verdicts SET match_polarity = ? WHERE id = ?", updates
+    )
+    conn.commit()
+    log.info(
+        "edge_cases.backfill_polarity: marked %d inverse, %d same (out of %d match=yes unknowns)",
+        n_inverse, n_same, len(rows),
+    )
+    return n_inverse, n_same
+
+
 @dataclass(frozen=True)
 class EdgePattern:
     name: str

@@ -24,6 +24,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 _VALID_MATCH = {"yes", "no", "ambiguous"}
 _VALID_ALIGN = {"yes", "no", "unknown"}
 _VALID_RISK = {"none", "low", "medium", "high"}
+_VALID_POLARITY = {"same", "inverse", "unknown"}
 # Aliases the model emits in practice; map to canonical
 _RISK_ALIASES = {
     "critical": "high",
@@ -56,6 +57,11 @@ class PairVerdict(BaseModel):
     confidence: float = Field(default=0.5, ge=0.0, le=1.0)
     resolution_aligned: str = Field(default="unknown")
     resolution_divergence_risk: str = Field(default="high")
+    # NEW 2026-04-29: track whether match=yes is "same polarity" (Kalshi YES
+    # ≡ Poly YES) or "inverse" (Kalshi YES ≡ Poly NO, e.g. complementary
+    # 2-party-governor markets). Defaults to "unknown" for legacy verdicts;
+    # inverse pairs require different arb math in signal/spread.py.
+    match_polarity: str = Field(default="unknown")
     divergence_reason: str = Field(default="")
     normalized_question: str = Field(default="")
     reasoning: str = Field(default="")
@@ -74,6 +80,20 @@ class PairVerdict(BaseModel):
     def _norm_align(cls, v: Any) -> str:
         s = _coerce_str(v).strip().lower()
         if s in _VALID_ALIGN:
+            return s
+        return "unknown"
+
+    @field_validator("match_polarity", mode="before")
+    @classmethod
+    def _norm_polarity(cls, v: Any) -> str:
+        s = _coerce_str(v).strip().lower()
+        # Common aliases the model emits in practice
+        if s in ("same", "identical", "equivalent", "direct", "same-side"):
+            return "same"
+        if s in ("inverse", "complementary", "complement", "opposite",
+                 "negated", "negation", "anti", "anti-correlated"):
+            return "inverse"
+        if s in _VALID_POLARITY:
             return s
         return "unknown"
 

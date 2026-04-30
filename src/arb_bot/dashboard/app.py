@@ -98,7 +98,7 @@ def create_app() -> Flask:
                 """SELECT c.id AS candidate_id, c.kalshi_ticker, c.poly_global_market_id,
                        c.cosine_similarity,
                        v.id AS verdict_id, v.match, v.confidence, v.resolution_aligned,
-                       v.resolution_divergence_risk, v.divergence_reason,
+                       v.resolution_divergence_risk, v.match_polarity, v.divergence_reason,
                        v.normalized_question, v.reasoning,
                        v.edge_case_flags, v.edge_case_downgraded
                 """ + base + tier_clauses.get(tier, "") + order_by + " LIMIT 1"

@@ -6,6 +6,11 @@
   {% elif level == 'none' %}<span class="pill pill-none">CLEAN</span>
   {% else %}<span class="pill pill-amb">{{ level }}</span>{% endif %}
 {% endmacro %}
+{% macro polarity_pill(p) %}
+  {% if p == 'same' %}<span class="pill pill-clean">YES≡YES (same)</span>
+  {% elif p == 'inverse' %}<span class="pill pill-med" style="background:#fde7c2; color:#7a5500;">YES≡NO (inverse — different arb math)</span>
+  {% else %}<span class="pill pill-amb">polarity unknown</span>{% endif %}
+{% endmacro %}
 {% block content %}
 <h1>Approval queue</h1>
 <div class="card" style="background:#fafafa;">
@@ -47,6 +52,7 @@
   <h3>LLM verdict</h3>
   <div class="kv">
     <dt>Match</dt><dd><strong>{{ pair.match }}</strong> (confidence {{ "%.0f" % (pair.confidence * 100) }}%)</dd>
+    {% if pair.match == 'yes' %}<dt>Polarity</dt><dd>{{ polarity_pill(pair.match_polarity) }}</dd>{% endif %}
     <dt>Resolution aligned</dt><dd>{{ pair.resolution_aligned }}</dd>
     <dt>Divergence risk</dt><dd>{{ risk_pill(pair.resolution_divergence_risk) }}</dd>
     {% if pair.divergence_reason %}<dt>Divergence reason</dt><dd>{{ pair.divergence_reason }}</dd>{% endif %}

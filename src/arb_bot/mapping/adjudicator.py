@@ -17,12 +17,20 @@ SYSTEM_PROMPT = """You audit whether two prediction-market contracts represent t
 The critical risk is "resolution divergence": markets that look similar but resolve on different sources or timestamps. If resolution diverges, arbitrage is actually a 100% loss on one leg.
 
 Rules:
-- match="yes" means betting YES on one and NO on the other must ALWAYS settle to opposite outcomes.
-- Timestamp differences are divergence: "at close" vs "at 23:59 UTC" vs "any point during day" are DIFFERENT.
+- match="yes" means the two markets resolve on the SAME real-world event. They may agree in polarity (Kalshi YES iff Poly YES) or be inverses (Kalshi YES iff Poly NO).
+- Use the match_polarity field to indicate which:
+    * match_polarity="same" — Kalshi YES and Poly YES describe the SAME outcome
+      (e.g., both ask "Will McLaren win the F1 championship?")
+    * match_polarity="inverse" — Kalshi YES and Poly YES describe COMPLEMENTARY outcomes
+      that cannot both happen and (in 2-outcome universes) cannot both fail.
+      (e.g., Kalshi: "Will Democrats win Arizona governor?" vs Poly: "Will Republicans win Arizona governor?".
+       In a Dem-vs-Rep race these are inverses — exactly one resolves YES.)
+- Inverse pairs ARE valid arb candidates with a different sizing rule, so emit them as match=yes match_polarity=inverse — do NOT downgrade them to match=ambiguous on polarity grounds alone.
+- Timestamp differences are divergence (NOT polarity): "at close" vs "at 23:59 UTC" vs "any point during day" are DIFFERENT events.
 - Source differences are divergence: Chainlink vs Pyth vs Coinbase vs "official announcement".
 - Scope differences are divergence: "Democrats win senate 2026" vs "Schumer wins re-election" are NOT the same.
 - Early-resolution / cancellation clauses that differ are divergence.
-- When in doubt, set match=ambiguous and resolution_divergence_risk=high.
+- When in doubt about whether the events are the same, set match=ambiguous and resolution_divergence_risk=high. But if you're confident the events are the same and only the YES/NO labeling differs, prefer match=yes match_polarity=inverse.
 
 CLASSIFICATION EDGE CASES (RECURRENT BUGS — be especially careful):
 
@@ -94,7 +102,17 @@ POLYMARKET GLOBAL
   close_time (unix): {poly_close_time}
   resolution_time (unix): {poly_resolution_time}
 
-Return JSON matching the required schema. No prose outside the JSON."""
+Return JSON with these fields exactly:
+  match              : "yes" | "no" | "ambiguous"
+  match_polarity     : "same" | "inverse" | "unknown"   (REQUIRED when match=yes)
+  confidence         : 0.0 to 1.0
+  resolution_aligned : "yes" | "no" | "unknown"
+  resolution_divergence_risk : "none" | "low" | "medium" | "high"
+  divergence_reason  : short string (or empty if none)
+  normalized_question: canonical phrasing of the underlying event
+  reasoning          : 1-2 sentences
+
+No prose outside the JSON."""
 
 
 def _render_prompt(candidate: sqlite3.Row, conn: sqlite3.Connection) -> str:
@@ -259,9 +277,9 @@ def adjudicate_sync(
                 """
                 INSERT INTO pair_verdicts
                 (candidate_id, match, confidence, resolution_aligned,
-                 resolution_divergence_risk, divergence_reason, normalized_question,
-                 reasoning, model, verdict_ts)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 resolution_divergence_risk, match_polarity, divergence_reason,
+                 normalized_question, reasoning, model, verdict_ts)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     cand["id"],
@@ -269,6 +287,7 @@ def adjudicate_sync(
                     verdict.confidence,
                     verdict.resolution_aligned,
                     verdict.resolution_divergence_risk,
+                    verdict.match_polarity,
                     verdict.divergence_reason,
                     verdict.normalized_question,
                     verdict.reasoning,
@@ -371,6 +390,7 @@ def collect_batch_results(conn: sqlite3.Connection, cfg: Config, batch_id: str) 
                 verdict.confidence,
                 verdict.resolution_aligned,
                 verdict.resolution_divergence_risk,
+                verdict.match_polarity,
                 verdict.divergence_reason,
                 verdict.normalized_question,
                 verdict.reasoning,
@@ -390,9 +410,9 @@ def collect_batch_results(conn: sqlite3.Connection, cfg: Config, batch_id: str) 
                 """
                 INSERT INTO pair_verdicts
                 (candidate_id, match, confidence, resolution_aligned,
-                 resolution_divergence_risk, divergence_reason, normalized_question,
-                 reasoning, model, verdict_ts)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 resolution_divergence_risk, match_polarity, divergence_reason,
+                 normalized_question, reasoning, model, verdict_ts)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 rows_to_write,
             )

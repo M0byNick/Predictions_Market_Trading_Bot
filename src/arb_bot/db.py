@@ -56,6 +56,7 @@ CREATE TABLE IF NOT EXISTS pair_verdicts (
     confidence REAL NOT NULL,
     resolution_aligned TEXT NOT NULL,
     resolution_divergence_risk TEXT NOT NULL,
+    match_polarity TEXT NOT NULL DEFAULT 'unknown',
     divergence_reason TEXT,
     normalized_question TEXT,
     reasoning TEXT,
@@ -150,6 +151,13 @@ def connect(db_path: Path) -> sqlite3.Connection:
 def init_schema(db_path: Path) -> None:
     with connect(db_path) as conn:
         conn.executescript(SCHEMA)
+        # Idempotent upgrades for existing databases
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(pair_verdicts)")}
+        if "match_polarity" not in cols:
+            conn.execute(
+                "ALTER TABLE pair_verdicts "
+                "ADD COLUMN match_polarity TEXT NOT NULL DEFAULT 'unknown'"
+            )
         conn.commit()
 
 
