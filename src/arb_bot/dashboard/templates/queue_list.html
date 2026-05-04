@@ -99,7 +99,7 @@
           {% endfor %}
         </td>
         <td style="font-size:11px;">
-          <a href="{{ url_for('queue', tier=tier) }}?focus={{ r.candidate_id }}">→ details</a>
+          <a href="{{ url_for('queue', tier=tier, focus=r.candidate_id) }}">→ details</a>
         </td>
       </tr>
     {% endfor %}

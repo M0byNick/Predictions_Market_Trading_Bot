@@ -130,7 +130,11 @@ def create_app() -> Flask:
         #   "all"     = everything pending (default)
         # Uses LATEST verdict per candidate (across all models) so Opus
         # verdicts override earlier Sonnet ones where present.
+        #
+        # ?focus=<candidate_id> overrides tier filtering and shows that
+        # exact candidate (used by the bulk-review "→ details" link).
         tier = request.args.get("tier", "safest")
+        focus_id = request.args.get("focus", type=int)
         with db() as conn:
             base = """
                 FROM candidate_pairs c
@@ -162,15 +166,47 @@ def create_app() -> Flask:
                 " CASE WHEN v.edge_case_flags IS NULL OR v.edge_case_flags='[]' THEN 0 ELSE 1 END,"
                 " v.confidence DESC"
             )
-            row = conn.execute(
-                """SELECT c.id AS candidate_id, c.kalshi_ticker, c.poly_global_market_id,
+            select_cols = """SELECT c.id AS candidate_id, c.kalshi_ticker, c.poly_global_market_id,
                        c.cosine_similarity,
                        v.id AS verdict_id, v.match, v.confidence, v.resolution_aligned,
                        v.resolution_divergence_risk, v.match_polarity, v.divergence_reason,
                        v.normalized_question, v.reasoning,
                        v.edge_case_flags, v.edge_case_downgraded
-                """ + base + tier_clauses.get(tier, "") + order_by + " LIMIT 1"
-            ).fetchone()
+                """
+            if focus_id is not None:
+                # Honor ?focus=<candidate_id>: bypass tier filter and load the
+                # exact candidate. Still excludes already-approved/rejected so
+                # operators don't accidentally re-decide via direct link.
+                row = conn.execute(
+                    select_cols + base + " AND c.id = ?",
+                    (focus_id,),
+                ).fetchone()
+                if row is None:
+                    # Fallback: candidate may have been just-approved/rejected.
+                    # Show without the approved/rejected filter so the operator
+                    # at least sees what they clicked on.
+                    row = conn.execute(
+                        select_cols + """
+                        FROM candidate_pairs c
+                        JOIN pair_verdicts v ON v.id = (
+                            SELECT id FROM pair_verdicts pv
+                            WHERE pv.candidate_id = c.id
+                            ORDER BY pv.verdict_ts DESC, pv.id DESC LIMIT 1
+                        )
+                        WHERE c.id = ?
+                        """,
+                        (focus_id,),
+                    ).fetchone()
+                    if row is not None:
+                        flash(
+                            f"Candidate #{focus_id} has already been "
+                            f"approved or rejected; showing read-only.",
+                            "warning",
+                        )
+            else:
+                row = conn.execute(
+                    select_cols + base + tier_clauses.get(tier, "") + order_by + " LIMIT 1"
+                ).fetchone()
             if not row:
                 return render_template("queue_empty.html", tier=tier)
             kal = conn.execute(
