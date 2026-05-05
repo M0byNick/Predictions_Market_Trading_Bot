@@ -206,16 +206,43 @@ EDGE_PATTERNS: tuple[EdgePattern, ...] = (
     # 2026-04-30: Opus flagged 'replacement' as a recurring divergence
     # category. Kalshi/Poly handle resignations vs firings vs interim
     # acting officials differently for "leaves position by X" markets.
+    # 2026-05-04: Operator data shows replacement_eligibility had 4/9
+    # approval rate (44.4%) — by far the most-rejected pattern. Five of
+    # those rejections were Survivor "eliminated by Episode N" vs "wins
+    # season" pairs where Sonnet wrongly tagged inverse polarity. The
+    # exclusion-vs-winning-the-whole-thing logic is NOT a clean inverse;
+    # auto-downgrading to high until reviewer signs off explicitly.
     EdgePattern(
         name="replacement_eligibility",
-        regex=r"\b(replace|replaced|replacement|resign|resignation|fired|removed|leaves?|leaving|step\s*down|stepping\s*down)\b",
+        regex=r"\b(replace|replaced|replacement|resign|resignation|fired|removed|leaves?|leaving|step\s*down|stepping\s*down|eliminated|elimination|kicked\s+off|voted\s+off)\b",
         why=(
-            "Replacement / departure markets: venues differ on whether an "
-            "interim/acting official, resignation-but-not-yet-confirmed-"
-            "successor, or fired-but-litigating counts as 'left'. Verify "
-            "both venues' resolution criteria specify the same trigger."
+            "Replacement / departure / elimination markets: venues differ on "
+            "whether an interim/acting official, resignation-but-not-yet-"
+            "confirmed-successor, or fired-but-litigating counts as 'left'. "
+            "ESPECIALLY error-prone: 'will X be eliminated by Episode N' vs "
+            "'will X win the season' is NOT a clean inverse — there's a huge "
+            "middle space (eliminated after N, doesn't win). Operator "
+            "rejected 5/5 such Survivor pairs; pattern auto-downgraded."
         ),
-        auto_downgrade_to_high=False,
+        auto_downgrade_to_high=True,
+    ),
+    # 2026-05-04: New pattern surfaced from operator data — exclusion-vs-
+    # winning markets. Kalshi: "Will X be eliminated by Round N", Polymarket:
+    # "Will X win the tournament/season". These superficially look inverse
+    # but cover different events (X surviving past round N vs X winning the
+    # whole thing).
+    EdgePattern(
+        name="exclusion_vs_total_win",
+        regex=r"\b(eliminat\w+|knock\w+\s+out|advance|advancing|advances|bracket|round\s+of\s+\d+|early\s+exit|first\s+round)\b",
+        why=(
+            "Exclusion-from-round vs total-winner: 'X eliminated by Round N' "
+            "(Kalshi) is NOT the inverse of 'X wins it all' (Poly). Three "
+            "outcome regimes: (a) eliminated by N → Kalshi YES, Poly NO; "
+            "(b) eliminated after N but doesn't win → Kalshi NO, Poly NO; "
+            "(c) wins → Kalshi NO, Poly YES. Pattern auto-downgraded; trade "
+            "only on per-pair manual confirmation."
+        ),
+        auto_downgrade_to_high=True,
     ),
     # 2026-04-30: Opus flagged 'contested' close-race scenarios.
     EdgePattern(
