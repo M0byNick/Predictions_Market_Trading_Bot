@@ -318,21 +318,97 @@ def create_app() -> Flask:
     @app.get("/approved")
     def approved_list():
         tag = request.args.get("tag", "all")
+        # active=1 (default), 0 = inactive only, -1 (or "any") = both
+        status = request.args.get("status", "active")
         with db() as conn:
             query = """
                 SELECT a.*, m1.title AS kalshi_title, m2.title AS poly_title
                 FROM approved_pairs a
                 LEFT JOIN markets m1 ON m1.venue='kalshi' AND m1.venue_market_id=a.kalshi_ticker
                 LEFT JOIN markets m2 ON m2.venue='poly_global' AND m2.venue_market_id=a.poly_global_market_id
-                WHERE a.active=1
+                WHERE 1=1
             """
-            params: tuple = ()
+            params: list = []
+            if status == "active":
+                query += " AND a.active=1"
+            elif status == "inactive":
+                query += " AND a.active=0"
+            # else "any" → no filter
             if tag in ("clean", "high_risk"):
                 query += " AND a.tag = ?"
-                params = (tag,)
+                params.append(tag)
             query += " ORDER BY a.approved_ts DESC"
             rows = conn.execute(query, params).fetchall()
-        return render_template("approved.html", rows=rows, tag=tag)
+            # Count summary for the filter chips
+            counts = {
+                "active": conn.execute(
+                    "SELECT COUNT(*) FROM approved_pairs WHERE active=1"
+                ).fetchone()[0],
+                "inactive": conn.execute(
+                    "SELECT COUNT(*) FROM approved_pairs WHERE active=0"
+                ).fetchone()[0],
+            }
+        return render_template(
+            "approved.html",
+            rows=rows, tag=tag, status=status, counts=counts,
+        )
+
+    @app.post("/deactivate/<path:pair_id>")
+    def deactivate_pair(pair_id: str):
+        """Mark an approved pair as inactive — bot stops scanning it for
+        signals but the row + decision_context are preserved for /learn.
+        Use this for data-quality issues (stale prices, mis-tagged
+        polarity) without losing the audit trail.
+        """
+        reason = request.form.get("reason", "")
+        with db() as conn:
+            cur = conn.execute(
+                "SELECT pair_id, notes FROM approved_pairs WHERE pair_id=?",
+                (pair_id,),
+            ).fetchone()
+            if not cur:
+                abort(404)
+            with transaction(conn):
+                # Append deactivation reason to notes (keeps history readable)
+                new_notes = cur["notes"] or ""
+                if reason:
+                    sep = " | " if new_notes else ""
+                    new_notes = f"{new_notes}{sep}DEACTIVATED({int(time.time())}): {reason}"
+                conn.execute(
+                    "UPDATE approved_pairs SET active=0, notes=? WHERE pair_id=?",
+                    (new_notes, pair_id),
+                )
+        flash(f"Deactivated {pair_id}", "warning")
+        return redirect(url_for(
+            "approved_list",
+            tag=request.form.get("tag", "all"),
+            status=request.form.get("status", "active"),
+        ))
+
+    @app.post("/reactivate/<path:pair_id>")
+    def reactivate_pair(pair_id: str):
+        """Re-enable a previously-deactivated pair. Bot resumes scanning."""
+        with db() as conn:
+            cur = conn.execute(
+                "SELECT pair_id, notes FROM approved_pairs WHERE pair_id=?",
+                (pair_id,),
+            ).fetchone()
+            if not cur:
+                abort(404)
+            with transaction(conn):
+                new_notes = cur["notes"] or ""
+                sep = " | " if new_notes else ""
+                new_notes = f"{new_notes}{sep}REACTIVATED({int(time.time())})"
+                conn.execute(
+                    "UPDATE approved_pairs SET active=1, notes=? WHERE pair_id=?",
+                    (new_notes, pair_id),
+                )
+        flash(f"Reactivated {pair_id}", "success")
+        return redirect(url_for(
+            "approved_list",
+            tag=request.form.get("tag", "all"),
+            status=request.form.get("status", "inactive"),
+        ))
 
     @app.get("/rejected")
     def rejected_list():

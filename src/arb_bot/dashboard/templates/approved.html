@@ -1,22 +1,45 @@
 {% extends "base.html" %}
 {% block content %}
 <h1>Approved pairs</h1>
-<p>
-  Filter:
-  <a href="{{ url_for('approved_list', tag='all') }}">All</a> |
-  <a href="{{ url_for('approved_list', tag='clean') }}">Clean only</a> |
-  <a href="{{ url_for('approved_list', tag='high_risk') }}">High-risk only</a>
-</p>
+
+<div class="card" style="background:#fafafa;">
+  <strong>Status:</strong>
+  <a href="{{ url_for('approved_list', tag=tag, status='active') }}"
+     {% if status=='active' %}style="font-weight:bold;"{% endif %}>Active ({{ counts.active }})</a> |
+  <a href="{{ url_for('approved_list', tag=tag, status='inactive') }}"
+     {% if status=='inactive' %}style="font-weight:bold;"{% endif %}>Inactive ({{ counts.inactive }})</a> |
+  <a href="{{ url_for('approved_list', tag=tag, status='any') }}"
+     {% if status=='any' %}style="font-weight:bold;"{% endif %}>All</a>
+  &nbsp;&nbsp;|&nbsp;&nbsp;
+  <strong>Tag:</strong>
+  <a href="{{ url_for('approved_list', tag='all', status=status) }}"
+     {% if tag=='all' %}style="font-weight:bold;"{% endif %}>All</a> |
+  <a href="{{ url_for('approved_list', tag='clean', status=status) }}"
+     {% if tag=='clean' %}style="font-weight:bold;"{% endif %}>Clean</a> |
+  <a href="{{ url_for('approved_list', tag='high_risk', status=status) }}"
+     {% if tag=='high_risk' %}style="font-weight:bold;"{% endif %}>High-risk</a>
+  <div class="muted" style="margin-top:6px; font-size:13px;">
+    Inactive pairs are skipped by the bot's signal scan but kept in /learn analytics.
+    Use deactivate for stale-data or mis-tagged pairs surfaced by /dry_run.
+  </div>
+</div>
+
 <table>
   <thead>
     <tr>
-      <th>Pair ID</th><th>Tag</th><th>Risk</th><th>Polarity</th><th>Kalshi</th><th>Polymarket</th><th>Approved</th>
+      <th>Tag</th>
+      <th>Risk</th>
+      <th>Polarity</th>
+      <th>Active</th>
+      <th>Kalshi</th>
+      <th>Polymarket</th>
+      <th>Approved (UTC)</th>
+      <th>Action</th>
     </tr>
   </thead>
   <tbody>
   {% for r in rows %}
-    <tr>
-      <td><code>{{ r.pair_id }}</code></td>
+    <tr {% if r.active == 0 %}style="opacity:0.55;"{% endif %}>
       <td>
         {% if r.tag == 'clean' %}<span class="pill pill-clean">clean</span>
         {% else %}<span class="pill pill-high">high_risk</span>{% endif %}
@@ -27,11 +50,57 @@
         {% elif r.match_polarity == 'inverse' %}<span class="pill pill-med" style="background:#fde7c2; color:#7a5500;">inverse</span>
         {% else %}<span class="pill pill-amb">unknown</span>{% endif %}
       </td>
-      <td><a href="{{ url_for('market_detail', venue='kalshi', market_id=r.kalshi_ticker) }}">{{ r.kalshi_title or r.kalshi_ticker }}</a></td>
-      <td><a href="{{ url_for('market_detail', venue='poly_global', market_id=r.poly_global_market_id) }}">{{ r.poly_title or r.poly_global_market_id }}</a></td>
-      <td class="muted">{{ r.approved_ts }}</td>
+      <td>
+        {% if r.active == 1 %}
+          <span class="pill pill-clean">active</span>
+        {% else %}
+          <span class="pill pill-amb">inactive</span>
+        {% endif %}
+      </td>
+      <td style="max-width:300px; font-size:13px;">
+        <a href="{{ url_for('market_detail', venue='kalshi', market_id=r.kalshi_ticker) }}">
+          {{ (r.kalshi_title or r.kalshi_ticker)[:80] }}
+        </a>
+      </td>
+      <td style="max-width:300px; font-size:13px;">
+        <a href="{{ url_for('market_detail', venue='poly_global', market_id=r.poly_global_market_id) }}">
+          {{ (r.poly_title or r.poly_global_market_id)[:80] }}
+        </a>
+      </td>
+      <td class="muted" style="font-size:12px;">{{ r.approved_ts }}</td>
+      <td>
+        {% if r.active == 1 %}
+          <form method="post" action="{{ url_for('deactivate_pair', pair_id=r.pair_id) }}" class="inline" style="display:flex; gap:4px;">
+            <input type="hidden" name="tag" value="{{ tag }}">
+            <input type="hidden" name="status" value="{{ status }}">
+            <input type="text" name="reason" placeholder="reason (opt)"
+                   style="font-size:11px; padding:2px 4px; width:120px;">
+            <button type="submit" class="reject" style="font-size:11px; padding:2px 6px;"
+                    onclick="return confirm('Deactivate {{ r.pair_id[:40] }}?')">deactivate</button>
+          </form>
+        {% else %}
+          <form method="post" action="{{ url_for('reactivate_pair', pair_id=r.pair_id) }}" class="inline">
+            <input type="hidden" name="tag" value="{{ tag }}">
+            <input type="hidden" name="status" value="{{ status }}">
+            <button type="submit" style="font-size:11px; padding:2px 6px; background:#1f7a1f;">reactivate</button>
+          </form>
+        {% endif %}
+      </td>
     </tr>
+    {% if r.notes and 'DEACTIVATED' in (r.notes or '') %}
+    <tr {% if r.active == 0 %}style="opacity:0.55;"{% endif %}>
+      <td colspan="8" class="muted" style="font-size:11px; padding-left:24px;">
+        notes: {{ r.notes[:200] }}
+      </td>
+    </tr>
+    {% endif %}
   {% endfor %}
   </tbody>
 </table>
+
+{% if rows|length == 0 %}
+  <div class="card">
+    <p class="muted">No pairs match the current filter.</p>
+  </div>
+{% endif %}
 {% endblock %}
