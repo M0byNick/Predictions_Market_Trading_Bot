@@ -360,6 +360,114 @@ EDGE_PATTERNS: tuple[EdgePattern, ...] = (
         ),
         auto_downgrade_to_high=False,
     ),
+
+    # ───────────────────────────────────────────────────────────────────
+    # 2026-05-05: 8 new patterns added for sharper learning signals.
+    # These target categories /learn would benefit most from getting
+    # operator data on. Each is intentionally narrow (regex ≠ ambiguous)
+    # so the flag, when it fires, is a real signal — not noise.
+    # ───────────────────────────────────────────────────────────────────
+
+    # Pattern that caught 2 of the 10 first-batch rejections (CPI 3.3
+    # vs 3.5 vs 3.7). When BOTH sides have a numeric threshold and the
+    # numbers differ, the markets ask different questions even if the
+    # surrounding text matches.
+    EdgePattern(
+        name="numerical_threshold_mismatch",
+        regex=r"\b\d+(\.\d+)?\s*%|\b(above|below|over|under|at\s+least|at\s+most|≤|≥|>=|<=|>|<)\s*\$?\d+",
+        why=(
+            "Numeric threshold present in title (X%, above/below N, etc.). "
+            "Operator/LLM must verify both sides use the SAME threshold. "
+            "Common reject pattern from Sonnet on CPI markets where one "
+            "side says >3.3% and other says ≤3.1% — different events."
+        ),
+        auto_downgrade_to_high=False,
+    ),
+
+    # Specific date with day-of-month explicit. Tightened to require
+    # 'by/before/after/until' followed by month+day OR a comma-separated
+    # 'Month Day, Year' format. Drops the broad year-only matcher (was
+    # too noisy — flagged ~99% of pairs).
+    EdgePattern(
+        name="specific_date_window",
+        regex=r"\b(by|before|after|until|prior\s+to|no\s+later\s+than)\s+(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)(uary|ruary|ch|il|e|y|ust|tember|ober|ember)?\s+\d{1,2}\b",
+        why=(
+            "Specific date deadline ('by May 1', 'before June 30', etc.). "
+            "When pair sides have DIFFERENT cutoff dates, the markets "
+            "resolve on different windows. Operator rejected the Machado "
+            "Venezuela pair (May 1 vs Jun 30) for exactly this reason."
+        ),
+        auto_downgrade_to_high=False,
+    ),
+
+    # 'Which/who' markets often span multiple sub-outcomes; pairing one
+    # against a binary 'will X' market is a scope mismatch.
+    EdgePattern(
+        name="multi_outcome_question",
+        regex=r"^(which|who|how\s+many|how\s+much|when\s+will)\b",
+        why=(
+            "Multi-outcome question (Which X? Who will Y? How many Z?) on "
+            "one side of the pair often pairs with a binary 'will X happen' "
+            "on the other. These have DIFFERENT settlement spaces — "
+            "Kalshi may pay one of N options while Polymarket settles a "
+            "binary, breaking arb math."
+        ),
+        auto_downgrade_to_high=False,
+    ),
+
+    # Announce vs implement: passage vs effect, signing vs execution.
+    EdgePattern(
+        name="announcement_vs_implementation",
+        regex=r"\b(announce|announced|signs?|signed|passed|pass\b|approve\b|approved|ratif|enact|takes?\s+effect|implement|implementation|effective\b|in\s+force)\b",
+        why=(
+            "Announcement-vs-implementation gap: 'will law be passed' "
+            "(announcement) ≠ 'will law take effect' (implementation). "
+            "Same for treaties, executive orders, regulations. Hours to "
+            "months between the two; venues may differ on which counts."
+        ),
+        auto_downgrade_to_high=False,
+    ),
+
+    # Partial event vs complete event: 'major attack' vs 'invasion' vs
+    # 'war declaration' — graded thresholds.
+    EdgePattern(
+        name="partial_vs_complete_event",
+        regex=r"\b(major|full|major-scale|full-scale|partial|limited|escalation|escalate|declaration\s+of\s+war|formally\s+declare)\b",
+        why=(
+            "Partial-vs-complete event scaling. 'Major attack' (Kalshi) "
+            "and 'full-scale invasion' (Poly) are different thresholds "
+            "even when same conflict. Consensus on what counts as "
+            "'major' / 'full-scale' varies by venue."
+        ),
+        auto_downgrade_to_high=False,
+    ),
+
+    # Sports player-action vs team-result: 'will X score' vs 'will team Y win'.
+    EdgePattern(
+        name="player_action_vs_team_result",
+        regex=r"\b(score|scores|scored|goal|home\s+run|hr\b|touchdown|tdpass|interception|saved|hits?\s+\d|MVP|first\s+(goal|score|td|to\s+score)|player\s+of\s+the)\b",
+        why=(
+            "Player-specific outcome vs team result. 'Will Mahomes "
+            "score 2 TDs' (player) and 'Will Chiefs win' (team) are "
+            "correlated but not equivalent. Cosine match on team/player "
+            "name often pairs these despite different events."
+        ),
+        auto_downgrade_to_high=False,
+    ),
+
+    # Specific game/match number vs series outcome.
+    EdgePattern(
+        name="single_game_vs_series",
+        regex=r"\bgame\s+\d|\bgame\s+(one|two|three|four|five|six|seven)\b|\bmatch\s+\d|\bday\s+\d\s+of\b",
+        why=(
+            "Single-game/match vs series outcome. Kalshi's 'Game 5 "
+            "winner' (single game) vs Polymarket's 'series winner' "
+            "(best-of-N) are different events. Series state at the "
+            "time can make them look correlated but they settle "
+            "independently for 6/7 games."
+        ),
+        auto_downgrade_to_high=False,
+    ),
 )
 
 
@@ -424,10 +532,14 @@ def flag_all_verdicts(conn: sqlite3.Connection) -> tuple[int, int, int]:
             [{"name": f.name, "why": f.why} for f in flags],
             ensure_ascii=False,
         )
-        # Decide whether to force-downgrade risk
+        # Decide whether to force-downgrade risk. IDEMPOTENT: a pair
+        # whose flags include any auto_downgrade_to_high pattern stays
+        # marked as downgraded even on re-runs, regardless of the
+        # current risk value. (Previously this only fired if risk was
+        # in (none, low), which broke re-runs after the initial pass.)
         new_risk = r["resolution_divergence_risk"]
         downgraded = 0
-        if any(f.auto_downgrade_to_high for f in flags) and r["resolution_divergence_risk"] in ("none", "low"):
+        if any(f.auto_downgrade_to_high for f in flags):
             new_risk = "high"
             n_downgraded += 1
             downgraded = 1

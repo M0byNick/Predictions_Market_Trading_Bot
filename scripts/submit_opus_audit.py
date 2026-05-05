@@ -46,6 +46,12 @@ def main() -> int:
     parser.add_argument("--max", type=int, default=None)
     parser.add_argument("--model", type=str, default="claude-opus-4-7",
                         help="override (default: claude-opus-4-7)")
+    parser.add_argument("--skip-auto-high", action="store_true",
+                        help="Exclude pairs whose only suspect-tier "
+                             "membership is via edge_case_downgraded=1. "
+                             "Use this when domain rules already produce "
+                             "thousands of auto-downgrades and you only "
+                             "want Opus on the remaining edge cases.")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
@@ -101,9 +107,10 @@ def main() -> int:
                   AND l.edge_case_flags IS NOT NULL AND l.edge_case_flags != '[]')
                 -- ambiguous
                 OR l.match='ambiguous'
-                -- auto-flagged HIGH
-                OR l.edge_case_downgraded = 1
-                -- inverse polarity
+                """ + (
+                    "" if args.skip_auto_high else
+                    "-- auto-flagged HIGH\n                OR l.edge_case_downgraded = 1\n                "
+                ) + """-- inverse polarity
                 OR (l.match='yes' AND l.match_polarity='inverse')
               )
         """).fetchall()
