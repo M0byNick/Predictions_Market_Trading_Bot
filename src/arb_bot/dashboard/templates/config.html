@@ -1,0 +1,149 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Live config — bankroll &amp; risk</h1>
+
+<div class="card" style="background:#fafafa;">
+  <p>
+    All dollar limits are computed from <strong>INITIAL_BANKROLL_USD</strong>
+    via the percentage knobs below. Edit <code>.env</code> and restart the
+    dashboard to change. Same code works at $1K paper, $1K live, or $5K+ live
+    without touching individual caps.
+  </p>
+</div>
+
+<div class="row">
+  <div class="card">
+    <h3>Bankroll inputs (.env)</h3>
+    <div class="kv">
+      <dt>INITIAL_BANKROLL_USD</dt><dd>${{ "%.0f" % bankroll }}</dd>
+      <dt>PAPER_MAX_POSITION_PCT</dt><dd>{{ "%.0f%%" % (max_position_pct * 100) }}</dd>
+      <dt>PAPER_PER_PAIR_TARGET_PCT</dt><dd>{{ "%.0f%%" % (target_pct * 100) }}</dd>
+      <dt>PAPER_MIN_POSITION_USD</dt><dd>${{ "%.0f" % min_position_usd }}</dd>
+      <dt>PAPER_DAILY_MAX_LOSS_PCT</dt><dd>{{ "%.0f%%" % (daily_loss_pct * 100) }}</dd>
+      <dt>PAPER_MIN_EDGE_BPS</dt><dd>{{ min_edge_bps }} bps ({{ "%.1f%%" % (min_edge_bps / 100) }})</dd>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>Computed dollar limits</h3>
+    <div class="kv">
+      <dt>Per-pair max position</dt><dd>${{ "%.2f" % max_position_usd }} <span class="muted">(hard cap)</span></dd>
+      <dt>Per-pair target</dt><dd>${{ "%.2f" % target_per_pair_usd }} <span class="muted">(actual sizing)</span></dd>
+      <dt>Daily loss stop</dt><dd>${{ "%.2f" % daily_max_loss_usd }}</dd>
+      <dt>Min position floor</dt><dd>${{ "%.0f" % min_position_usd }}</dd>
+      <dt>Max simultaneous arbs</dt><dd>~{{ max_simultaneous }}<span class="muted"> (bankroll ÷ per-pair-target)</span></dd>
+    </div>
+    {% if target_per_pair_usd <= min_position_usd %}
+      <p style="color:var(--bad); margin-top:8px;">
+        ⚠ Target per-pair (${{ "%.2f" % target_per_pair_usd }}) is at or below
+        the minimum position floor (${{ "%.0f" % min_position_usd }}).
+        Increase INITIAL_BANKROLL_USD or reduce PAPER_MIN_POSITION_USD,
+        or signal/spread.py will skip every trade as too-small.
+      </p>
+    {% endif %}
+  </div>
+</div>
+
+<div class="card">
+  <h3>Friction model (per arb position, both legs)</h3>
+  <div class="kv">
+    <dt>Kalshi fee (per leg)</dt><dd>{{ kalshi_fee_bps }} bps ({{ "%.2f%%" % (kalshi_fee_bps / 100) }})</dd>
+    <dt>Polymarket Global fee (per leg)</dt><dd>{{ poly_fee_bps }} bps ({{ "%.2f%%" % (poly_fee_bps / 100) }}) <span class="muted">(taker; 0 if maker)</span></dd>
+    <dt>Slippage (per leg)</dt><dd>{{ slippage_bps }} bps ({{ "%.2f%%" % (slippage_bps / 100) }})</dd>
+    <dt>Round-trip fees</dt><dd>{{ round_trip_fee }} bps ({{ "%.2f%%" % (round_trip_fee / 100) }})</dd>
+    <dt>Round-trip incl. slippage</dt><dd><strong>{{ round_trip_total }} bps ({{ "%.2f%%" % (round_trip_total / 100) }})</strong></dd>
+    <dt>Min edge to trade</dt><dd>{{ min_edge_bps }} bps after fees</dd>
+  </div>
+</div>
+
+<div class="card">
+  <h3>Venue config</h3>
+  <div class="kv">
+    <dt>Kalshi base URL</dt><dd><code>{{ cfg.kalshi_base_url }}</code></dd>
+    <dt>Kalshi access key</dt><dd><code>{{ cfg.kalshi_access_key[:6] }}…{{ cfg.kalshi_access_key[-4:] if cfg.kalshi_access_key else "" }}</code> ({{ cfg.kalshi_access_key|length }} chars)</dd>
+    <dt>Kalshi PEM path</dt><dd><code>{{ cfg.kalshi_private_key_path }}</code></dd>
+    <dt>Polymarket gamma URL</dt><dd><code>{{ cfg.poly_global_gamma_url }}</code></dd>
+    <dt>Polymarket CLOB URL</dt><dd><code>{{ cfg.poly_global_clob_url }}</code></dd>
+    <dt>Polymarket wallet</dt><dd>
+      {% if cfg.poly_wallet_private_key %}
+        <span class="pill pill-high">SET (live trading enabled)</span>
+      {% else %}
+        <span class="pill pill-clean">empty (paper-only)</span>
+      {% endif %}
+    </dd>
+    <dt>Anthropic model</dt><dd><code>{{ cfg.anthropic_model }}</code></dd>
+    <dt>Mode</dt><dd>{{ cfg.mode }}</dd>
+  </div>
+</div>
+
+<div class="card">
+  <h3>Sizing examples at this config</h3>
+  <table>
+    <thead><tr>
+      <th>Polarity</th>
+      <th>Kalshi YES</th>
+      <th>Poly YES</th>
+      <th>Cap/unit</th>
+      <th>Units (target ${{ "%.0f" % target_per_pair_usd }})</th>
+      <th>Actual capital</th>
+    </tr></thead>
+    <tbody>
+      {% set targ = target_per_pair_usd %}
+      {% for ex in [
+        ('same', 0.50, 0.55, 0.55),
+        ('same', 0.30, 0.35, 0.35),
+        ('inverse', 0.50, 0.55, 1.05),
+        ('inverse', 0.40, 0.65, 1.05),
+        ('inverse', 0.20, 0.85, 1.05)
+      ] %}
+        {% set polarity, kp, pp, cpu = ex %}
+        {% set units = (targ / cpu)|int %}
+        {% set capital = units * cpu %}
+        <tr>
+          <td>{{ polarity }}</td>
+          <td>${{ "%.2f" % kp }}</td>
+          <td>${{ "%.2f" % pp }}</td>
+          <td>${{ "%.2f" % cpu }}</td>
+          <td>{{ units }}</td>
+          <td>${{ "%.2f" % capital }}</td>
+        </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <p class="muted" style="font-size:13px;">
+    Capital/unit: same-polarity uses max(YES prices) (you buy at the higher
+    price); inverse-polarity uses sum_YES (worst-case liability when one leg
+    fires). Units are rounded down — actual capital may sit slightly under
+    the target.
+  </p>
+</div>
+
+<div class="card">
+  <h3>Rebalance with bankroll</h3>
+  <p>
+    To switch to a different bankroll size, edit <code>.env</code> and restart
+    the dashboard. Examples:
+  </p>
+  <table>
+    <thead><tr>
+      <th>Bankroll</th><th>Per-pair target</th><th>Max position</th>
+      <th>Daily stop</th><th>Max simultaneous arbs</th>
+    </tr></thead>
+    <tbody>
+      {% for br in [500, 1000, 2500, 5000, 10000] %}
+        {% set tg = (br * target_pct)|float %}
+        {% set tg = (min_position_usd if tg < min_position_usd else tg) %}
+        {% set mx = (br * max_position_pct)|float %}
+        {% set tg = (mx if tg > mx else tg) %}
+        <tr {% if br == bankroll %}style="background:#dff3df;"{% endif %}>
+          <td>${{ "%.0f" % br }}{% if br == bankroll %} ← current{% endif %}</td>
+          <td>${{ "%.2f" % tg }}</td>
+          <td>${{ "%.2f" % (br * max_position_pct) }}</td>
+          <td>${{ "%.2f" % (br * daily_loss_pct) }}</td>
+          <td>~{{ (br / tg)|int if tg > 0 else 0 }}</td>
+        </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}

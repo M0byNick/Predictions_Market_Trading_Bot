@@ -61,6 +61,7 @@ class ArbSignal:
     fee_adjusted_edge_bps: float
     direction: str
     size_units: int
+    target_capital_usd: float  # planned $ outlay for this position (informational)
     would_trade: bool
     reject_reason: str | None
 
@@ -76,6 +77,39 @@ def _mid(bid: float | None, ask: float | None) -> float | None:
 def _sum_fee_bps() -> int:
     """Round-trip fee assumption: both legs charged on each venue."""
     return KALSHI_FEE_BPS + POLY_GLOBAL_FEE_BPS
+
+
+def _capital_per_unit(polarity: str, kal_mid: float, poly_mid: float) -> float:
+    """Capital required per contract-unit traded.
+
+    SAME polarity (buy cheap leg + sell expensive leg):
+        capital = max(kal_mid, poly_mid)  ≈ ~$0.50 at-the-money
+    INVERSE polarity (sell-both-YES or buy-both-YES):
+        capital = kal_mid + poly_mid      ≈ ~$1.00 at-the-money
+        (we treat the SHORT-both-YES case as having to deliver $1 if
+         either fires — worst-case capital reservation)
+    """
+    if polarity == "inverse":
+        return max(0.01, kal_mid + poly_mid)
+    return max(0.01, max(kal_mid, poly_mid))
+
+
+def _compute_size_units(
+    cfg: Config, polarity: str, kal_mid: float, poly_mid: float
+) -> tuple[int, float]:
+    """Translate the bankroll-fraction target into integer contract units.
+
+    Returns (size_units, target_capital_usd). When the target falls below
+    PAPER_MIN_POSITION_USD, returns (0, 0) — caller treats as "skip too
+    small".
+    """
+    target = cfg.paper_per_pair_target_usd
+    if target < cfg.paper_min_position_usd:
+        return 0, 0.0
+    cpu = _capital_per_unit(polarity, kal_mid, poly_mid)
+    units = max(1, int(target / cpu))
+    actual_capital = units * cpu
+    return units, actual_capital
 
 
 def _detect_same_polarity(
@@ -150,20 +184,34 @@ def detect_for_pair(conn: sqlite3.Connection, cfg: Config, pair_row: sqlite3.Row
             fee_adjusted_edge_bps=0.0,
             direction="skip_polarity_unknown",
             size_units=0,
+            target_capital_usd=0.0,
             would_trade=False,
             reject_reason="polarity unknown — needs re-adjudication or human override",
         )
 
+    # Bankroll-driven sizing
+    size_units, target_capital_usd = _compute_size_units(
+        cfg, polarity, kal_mid, poly_mid
+    )
+
     would_trade = True
     reject_reason: str | None = None
-    if fee_adjusted_edge_bps < cfg.paper_min_edge_bps:
+    if size_units == 0:
         would_trade = False
-        reject_reason = f"edge {fee_adjusted_edge_bps:.0f}bps < threshold {cfg.paper_min_edge_bps}bps"
+        reject_reason = (
+            f"target ${cfg.paper_per_pair_target_usd:.2f} < min "
+            f"${cfg.paper_min_position_usd:.2f} — bankroll too small "
+            f"(set INITIAL_BANKROLL_USD higher)"
+        )
+    if would_trade and fee_adjusted_edge_bps < cfg.paper_min_edge_bps:
+        would_trade = False
+        reject_reason = (
+            f"edge {fee_adjusted_edge_bps:.0f}bps < "
+            f"threshold {cfg.paper_min_edge_bps}bps"
+        )
     if pair_row["tag"] == "high_risk":
         would_trade = False
         reject_reason = "high_risk pair: excluded from paper v1 trading"
-
-    size_units = 10  # paper v1: fixed 10-unit size; risk layer may shrink further
 
     return ArbSignal(
         pair_id=pair_row["pair_id"],
@@ -174,6 +222,7 @@ def detect_for_pair(conn: sqlite3.Connection, cfg: Config, pair_row: sqlite3.Row
         fee_adjusted_edge_bps=fee_adjusted_edge_bps,
         direction=direction,
         size_units=size_units,
+        target_capital_usd=target_capital_usd,
         would_trade=would_trade,
         reject_reason=reject_reason,
     )

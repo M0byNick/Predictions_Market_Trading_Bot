@@ -52,9 +52,16 @@ class Config:
     anthropic_api_key: str
     anthropic_model: str
 
-    # Risk (paper)
-    paper_max_position_usd: float
-    paper_daily_max_loss_usd: float
+    # Bankroll-driven risk (paper). Dollar caps are computed from
+    # initial_bankroll_usd × the percentage knobs below — so the same
+    # code works at $1K paper, $1K live, or $5K+ live without manual
+    # tuning. See `Config.paper_max_position_usd` etc. (computed
+    # properties below) for the resolved dollar values.
+    initial_bankroll_usd: float
+    paper_max_position_pct: float        # max single-pair capital, as fraction of bankroll
+    paper_per_pair_target_pct: float     # target capital per arb position, as fraction of bankroll
+    paper_min_position_usd: float        # below this, slippage eats the trade — skip
+    paper_daily_max_loss_pct: float      # daily loss stop, as fraction of bankroll
     paper_min_edge_bps: int
 
     # Mapping
@@ -72,6 +79,27 @@ class Config:
     @property
     def db_path(self) -> Path:
         return self.data_dir / "arb_bot.sqlite"
+
+    # ---- bankroll-derived risk values (computed) ------------------------
+
+    @property
+    def paper_max_position_usd(self) -> float:
+        """Hard cap per arb position. Bankroll × max_pct."""
+        return self.initial_bankroll_usd * self.paper_max_position_pct
+
+    @property
+    def paper_per_pair_target_usd(self) -> float:
+        """Target capital per arb position. Floored at min_position_usd
+        and capped at max_position_usd. Used by signal/spread.py to
+        translate target-$ into contract units."""
+        target = self.initial_bankroll_usd * self.paper_per_pair_target_pct
+        target = min(target, self.paper_max_position_usd)
+        return max(target, self.paper_min_position_usd)
+
+    @property
+    def paper_daily_max_loss_usd(self) -> float:
+        """Daily loss stop. Bankroll × loss_pct."""
+        return self.initial_bankroll_usd * self.paper_daily_max_loss_pct
 
 
 def load_config() -> Config:
@@ -108,8 +136,14 @@ def load_config() -> Config:
         poly_wallet_private_key=_env("POLY_WALLET_PRIVATE_KEY"),
         anthropic_api_key=_env("ANTHROPIC_API_KEY"),
         anthropic_model=_env("ANTHROPIC_MODEL", "claude-sonnet-4-6"),
-        paper_max_position_usd=_env_float("PAPER_MAX_POSITION_USD", 500.0),
-        paper_daily_max_loss_usd=_env_float("PAPER_DAILY_MAX_LOSS_USD", 100.0),
+        # Bankroll-driven risk (paper-v1 defaults sized for ~$1K bankroll;
+        # all dollar caps scale linearly via the @property accessors above).
+        # User can override INITIAL_BANKROLL_USD in .env to scale everything.
+        initial_bankroll_usd=_env_float("INITIAL_BANKROLL_USD", 1000.0),
+        paper_max_position_pct=_env_float("PAPER_MAX_POSITION_PCT", 0.10),
+        paper_per_pair_target_pct=_env_float("PAPER_PER_PAIR_TARGET_PCT", 0.05),
+        paper_min_position_usd=_env_float("PAPER_MIN_POSITION_USD", 25.0),
+        paper_daily_max_loss_pct=_env_float("PAPER_DAILY_MAX_LOSS_PCT", 0.05),
         paper_min_edge_bps=_env_int("PAPER_MIN_EDGE_BPS", 200),
         embed_model=_env("EMBED_MODEL", "BAAI/bge-small-en-v1.5"),
         embed_cosine_threshold=_env_float("EMBED_COSINE_THRESHOLD", 0.75),

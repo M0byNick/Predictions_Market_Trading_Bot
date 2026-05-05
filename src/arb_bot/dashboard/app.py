@@ -655,6 +655,38 @@ def create_app() -> Flask:
             approval_rate=approval_rate,
         )
 
+    @app.get("/config")
+    def config_page():
+        """Live bankroll + risk + venue config so operator can verify
+        the bot's working values match expectations before live trading."""
+        cfg = app.config["ARB_CFG"]
+        # Round-trip friction estimate from signal/spread.py
+        from arb_bot.signal.spread import KALSHI_FEE_BPS, POLY_GLOBAL_FEE_BPS
+        slippage_bps = 30  # paper executor's SLIPPAGE_BPS
+        round_trip_fee = KALSHI_FEE_BPS + POLY_GLOBAL_FEE_BPS
+        round_trip_total = round_trip_fee + 2 * slippage_bps  # both legs
+        bankroll = cfg.initial_bankroll_usd
+
+        return render_template(
+            "config.html",
+            cfg=cfg,
+            bankroll=bankroll,
+            max_position_pct=cfg.paper_max_position_pct,
+            target_pct=cfg.paper_per_pair_target_pct,
+            min_position_usd=cfg.paper_min_position_usd,
+            daily_loss_pct=cfg.paper_daily_max_loss_pct,
+            max_position_usd=cfg.paper_max_position_usd,
+            target_per_pair_usd=cfg.paper_per_pair_target_usd,
+            daily_max_loss_usd=cfg.paper_daily_max_loss_usd,
+            min_edge_bps=cfg.paper_min_edge_bps,
+            kalshi_fee_bps=KALSHI_FEE_BPS,
+            poly_fee_bps=POLY_GLOBAL_FEE_BPS,
+            slippage_bps=slippage_bps,
+            round_trip_fee=round_trip_fee,
+            round_trip_total=round_trip_total,
+            max_simultaneous=int(bankroll / max(cfg.paper_per_pair_target_usd, 0.01)),
+        )
+
     @app.get("/learn")
     def learn():
         """Pattern analysis: what attributes correlate with approve vs reject?"""
