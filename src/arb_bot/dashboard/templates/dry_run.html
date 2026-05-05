@@ -1,0 +1,152 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Dry-run scan</h1>
+
+<div class="card" style="background:#fafafa;">
+  <p>
+    Read-only one-shot scan against current market quotes from the latest
+    ingest. Shows what trades the bot <strong>would have made</strong>
+    if it ran a cycle right now. Does NOT persist anything.
+  </p>
+  <form method="post" action="{{ url_for('run_now') }}" style="display:inline;">
+    <button type="submit"
+            onclick="return confirm('Commit this scan: write paper_signals + paper_fills to the DB. Continue?')">
+      Run + commit (write paper signals)
+    </button>
+  </form>
+  &nbsp;
+  <a href="{{ url_for('dry_run') }}">Re-scan</a>
+</div>
+
+<div class="row">
+  <div class="card">
+    <h3>Scan summary</h3>
+    <div class="kv">
+      <dt>Approved pairs scanned</dt><dd>{{ scan.total_approved }}</dd>
+      <dt>Signals generated</dt><dd>{{ scan.signals_generated }}</dd>
+      <dt>Would trade</dt><dd><strong>{{ scan.would_trade }}</strong></dd>
+      <dt>Missing quotes</dt><dd>{{ scan.missing_quotes }} <span class="muted">(no recent bid/ask on one or both venues)</span></dd>
+      <dt>Polarity unknown</dt><dd>{{ scan.polarity_unknown }} <span class="muted">(skipped — no arb math)</span></dd>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>Aggregate (would-trade only)</h3>
+    <div class="kv">
+      <dt>Total capital deployed</dt><dd>${{ "%.2f" % total_capital }}</dd>
+      <dt>Expected gross profit</dt><dd><strong>${{ "%.2f" % total_expected_profit }}</strong></dd>
+      <dt>Expected ROI on cycle</dt>
+      <dd>
+        {% if total_capital > 0 %}
+          {{ "%.2f%%" % (100.0 * total_expected_profit / total_capital) }}
+        {% else %}—{% endif %}
+      </dd>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>Reject reasons</h3>
+    {% if reject_reasons %}
+    <table>
+      <thead><tr><th>Reason</th><th style="text-align:right;">Count</th></tr></thead>
+      <tbody>
+        {% for reason, n in reject_reasons %}
+          <tr>
+            <td>{{ reason }}</td>
+            <td style="text-align:right;">{{ n }}</td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+      <p class="muted">No rejections — every signal would trade.</p>
+    {% endif %}
+  </div>
+</div>
+
+<div class="card">
+  <h3>Top {{ rows_trade|length }} would-trade signals (ranked by edge)</h3>
+  {% if rows_trade %}
+  <table>
+    <thead>
+      <tr>
+        <th>Polarity</th>
+        <th>Kalshi YES</th>
+        <th>Poly YES</th>
+        <th>Spread</th>
+        <th>Edge</th>
+        <th>Direction</th>
+        <th>Units</th>
+        <th>Capital</th>
+        <th>Pair</th>
+      </tr>
+    </thead>
+    <tbody>
+    {% for r in rows_trade %}
+      <tr>
+        <td>
+          {% if r.polarity == 'same' %}<span class="pill pill-clean">same</span>
+          {% elif r.polarity == 'inverse' %}<span class="pill pill-med" style="background:#fde7c2;">inverse</span>
+          {% else %}<span class="pill pill-amb">?</span>{% endif %}
+        </td>
+        <td>{{ "%.3f" % r.kal_yes }}</td>
+        <td>{{ "%.3f" % r.poly_yes }}</td>
+        <td>{{ "%.3f" % r.raw_spread }}</td>
+        <td><strong>{{ "%.0f" % r.edge_bps }} bps</strong> ({{ "%.2f%%" % (r.edge_bps / 100) }})</td>
+        <td style="font-size:11px;">{{ r.direction.replace('_', ' ') }}</td>
+        <td>{{ r.size_units }}</td>
+        <td>${{ "%.2f" % r.target_capital }}</td>
+        <td style="font-size:12px; max-width:380px;">
+          <strong>K:</strong> {{ r.k_title[:48] }}<br>
+          <strong>P:</strong> {{ r.p_title[:48] }}
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+    <p class="muted">No would-trade signals — all approved pairs either lacked
+    fresh quotes or had insufficient edge after fees. Try lowering
+    PAPER_MIN_EDGE_BPS in <code>.env</code>, or wait for the hourly cron to
+    refresh prices.</p>
+  {% endif %}
+</div>
+
+{% if rows_skip %}
+<div class="card">
+  <h3>Top {{ rows_skip|length }} skipped signals (close to threshold — for tuning)</h3>
+  <p class="muted" style="font-size:13px;">
+    These had a real spread but didn't meet PAPER_MIN_EDGE_BPS. Useful for
+    seeing how close the threshold is to the actual market edge.
+  </p>
+  <table>
+    <thead>
+      <tr>
+        <th>Polarity</th>
+        <th>Kalshi YES</th>
+        <th>Poly YES</th>
+        <th>Spread</th>
+        <th>Edge</th>
+        <th>Reject reason</th>
+      </tr>
+    </thead>
+    <tbody>
+    {% for r in rows_skip %}
+      <tr>
+        <td>
+          {% if r.polarity == 'same' %}<span class="pill pill-clean">same</span>
+          {% elif r.polarity == 'inverse' %}<span class="pill pill-med" style="background:#fde7c2;">inverse</span>
+          {% else %}<span class="pill pill-amb">?</span>{% endif %}
+        </td>
+        <td>{{ "%.3f" % r.kal_yes }}</td>
+        <td>{{ "%.3f" % r.poly_yes }}</td>
+        <td>{{ "%.3f" % r.raw_spread }}</td>
+        <td>{{ "%.0f" % r.edge_bps }} bps ({{ "%.2f%%" % (r.edge_bps / 100) }})</td>
+        <td style="font-size:11px;">{{ r.reject_reason }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+{% endblock %}

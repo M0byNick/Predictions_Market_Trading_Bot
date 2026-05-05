@@ -50,6 +50,7 @@
     <a href="{{ url_for('stats') }}">Stats</a>
     <a href="{{ url_for('learn') }}">Learn</a>
     <a href="{{ url_for('config_page') }}">Config</a>
+    <a href="{{ url_for('dry_run') }}">Dry run</a>
   </nav>
   <main>
     {% with messages = get_flashed_messages(with_categories=true) %}

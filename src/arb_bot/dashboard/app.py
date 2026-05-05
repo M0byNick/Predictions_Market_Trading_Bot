@@ -655,6 +655,138 @@ def create_app() -> Flask:
             approval_rate=approval_rate,
         )
 
+    @app.get("/dry_run")
+    def dry_run():
+        """One-shot scan: compute paper signals against current market
+        quotes, ranked by fee-adjusted edge. Read-only — does NOT write
+        to paper_signals/paper_fills. Use /run_now (POST) to commit.
+        """
+        cfg = app.config["ARB_CFG"]
+        from arb_bot.signal.spread import detect_for_pair
+
+        scan_summary = {
+            "total_approved": 0,
+            "signals_generated": 0,
+            "would_trade": 0,
+            "missing_quotes": 0,
+            "polarity_unknown": 0,
+        }
+        reject_reasons: dict[str, int] = {}
+        rows: list = []
+
+        with db() as conn:
+            approved = conn.execute(
+                "SELECT * FROM approved_pairs WHERE active=1"
+            ).fetchall()
+            scan_summary["total_approved"] = len(approved)
+
+            for p in approved:
+                sig = detect_for_pair(conn, cfg, p)
+                if sig is None:
+                    scan_summary["missing_quotes"] += 1
+                    continue
+                scan_summary["signals_generated"] += 1
+                if sig.polarity == "unknown":
+                    scan_summary["polarity_unknown"] += 1
+                if sig.would_trade:
+                    scan_summary["would_trade"] += 1
+                else:
+                    reject_reasons[sig.reject_reason or "(unknown)"] = (
+                        reject_reasons.get(sig.reject_reason or "(unknown)", 0) + 1
+                    )
+                # Pull titles for display
+                kal = conn.execute(
+                    "SELECT title FROM markets WHERE venue='kalshi' AND venue_market_id=?",
+                    (p["kalshi_ticker"],),
+                ).fetchone()
+                poly = conn.execute(
+                    "SELECT title FROM markets WHERE venue='poly_global' AND venue_market_id=?",
+                    (p["poly_global_market_id"],),
+                ).fetchone()
+                rows.append({
+                    "pair_id": sig.pair_id,
+                    "polarity": sig.polarity,
+                    "kal_yes": sig.kalshi_yes_mid,
+                    "poly_yes": sig.poly_yes_mid,
+                    "raw_spread": sig.raw_spread,
+                    "edge_bps": sig.fee_adjusted_edge_bps,
+                    "direction": sig.direction,
+                    "size_units": sig.size_units,
+                    "target_capital": sig.target_capital_usd,
+                    "would_trade": sig.would_trade,
+                    "reject_reason": sig.reject_reason,
+                    "k_title": (kal["title"] if kal else "") or "",
+                    "p_title": (poly["title"] if poly else "") or "",
+                })
+
+        # Top opportunities by fee-adjusted edge — only would-trade signals
+        rows_trade = sorted(
+            [r for r in rows if r["would_trade"]],
+            key=lambda x: -x["edge_bps"],
+        )[:50]
+        rows_skip = sorted(
+            [r for r in rows if not r["would_trade"] and r["raw_spread"] > 0],
+            key=lambda x: -x["edge_bps"],
+        )[:30]
+
+        # Total estimated profit if we filled every would_trade pair at this size
+        total_capital = sum(r["target_capital"] for r in rows_trade)
+        total_expected_profit = sum(
+            r["target_capital"] * r["edge_bps"] / 10_000.0 for r in rows_trade
+        )
+
+        return render_template(
+            "dry_run.html",
+            scan=scan_summary,
+            reject_reasons=sorted(reject_reasons.items(), key=lambda x: -x[1]),
+            rows_trade=rows_trade,
+            rows_skip=rows_skip,
+            total_capital=total_capital,
+            total_expected_profit=total_expected_profit,
+        )
+
+    @app.post("/run_now")
+    def run_now():
+        """Commit a full scan: write paper_signals + paper_fills.
+
+        Mirrors what the cron runloop does on each cycle, but ad-hoc.
+        Honors the daily PnL stop + per-pair position cap from
+        risk/limits.py. Idempotent — re-running on the same data just
+        adds new signal rows; doesn't re-fill prior signals.
+        """
+        cfg = app.config["ARB_CFG"]
+        from arb_bot.executor.paper import simulate_fill
+        from arb_bot.risk.limits import check as risk_check
+        from arb_bot.signal.spread import detect_for_pair, record_signal
+
+        n_signals = 0
+        n_fills = 0
+        n_risk_blocks = 0
+        with db() as conn:
+            approved = conn.execute(
+                "SELECT * FROM approved_pairs WHERE active=1"
+            ).fetchall()
+            for p in approved:
+                sig = detect_for_pair(conn, cfg, p)
+                if sig is None:
+                    continue
+                sig_id = record_signal(conn, sig)
+                n_signals += 1
+                if not sig.would_trade:
+                    continue
+                ok, reason = risk_check(conn, cfg, sig.pair_id)
+                if not ok:
+                    n_risk_blocks += 1
+                    continue
+                simulate_fill(conn, sig_id, sig)
+                n_fills += 1
+        flash(
+            f"Committed: {n_signals} signals scored, {n_fills} paper-filled, "
+            f"{n_risk_blocks} risk-blocked.",
+            "success",
+        )
+        return redirect(url_for("dry_run"))
+
     @app.get("/config")
     def config_page():
         """Live bankroll + risk + venue config so operator can verify
