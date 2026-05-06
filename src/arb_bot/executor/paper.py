@@ -13,8 +13,16 @@ FILL_PROBABILITY = 1.0  # paper v1: always fill; phase 2 can model queue positio
 CONTRACT_NOTIONAL_USD = 1.0  # Kalshi + Poly-US YES contracts settle 0/1 USD
 
 
-def _fee_usd(price: float, units: int, fee_bps: int) -> float:
-    return price * units * CONTRACT_NOTIONAL_USD * (fee_bps / 10_000.0)
+def _fee_usd_kalshi(price: float, units: int) -> float:
+    """Per-leg Kalshi fee in dollars (per-trade formula, not flat bps)."""
+    from arb_bot.signal.spread import _kalshi_taker_fee_per_contract
+    return _kalshi_taker_fee_per_contract(price) * units
+
+
+def _fee_usd_poly(price: float, units: int) -> float:
+    """Per-leg Polymarket fee in dollars (per-trade formula)."""
+    from arb_bot.signal.spread import _poly_taker_fee_per_contract
+    return _poly_taker_fee_per_contract(price) * units
 
 
 def simulate_fill(
@@ -23,12 +31,11 @@ def simulate_fill(
     """Simulate both legs of the arb and record paper fills.
 
     paper v1 assumptions:
-      - both legs fill instantly at mid +/- SLIPPAGE_BPS
+      - both legs fill at mid +/- SLIPPAGE_BPS (paper proxy for real fill)
+      - fees applied per leg using the per-trade Kalshi/Polymarket formulas
+        from signal.spread (matches the audit-gap-fix fee model)
       - no partial-fill modeling (phase 2)
-      - fees applied per leg from arb_bot.signal.spread constants
     """
-    from arb_bot.signal.spread import KALSHI_FEE_BPS, POLY_GLOBAL_FEE_BPS
-
     now_ts = int(time.time())
     slip = SLIPPAGE_BPS / 10_000.0
 
@@ -75,7 +82,7 @@ def simulate_fill(
                 kal_price_intended,
                 kal_price_filled,
                 sig.size_units,
-                _fee_usd(kal_price_filled, sig.size_units, KALSHI_FEE_BPS),
+                _fee_usd_kalshi(kal_price_filled, sig.size_units),
                 now_ts,
             ),
         )
@@ -92,7 +99,7 @@ def simulate_fill(
                 poly_price_intended,
                 poly_price_filled,
                 sig.size_units,
-                _fee_usd(poly_price_filled, sig.size_units, POLY_GLOBAL_FEE_BPS),
+                _fee_usd_poly(poly_price_filled, sig.size_units),
                 now_ts,
             ),
         )
