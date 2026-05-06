@@ -126,24 +126,42 @@ def main() -> int:
             print("READ-ONLY: no rows written. Use --commit to persist.")
             return 0
 
-        # Commit path: mirrors main.py cycle
+        # Commit path: mirrors main.py cycle.
+        # Per-row commit + exception isolation: a single lock contention
+        # against the dashboard or hourly ingest costs us 1 row, not the
+        # whole cycle. Without this, sqlite WAL contention can roll back
+        # 400+ accumulated signals.
+        import sqlite3 as _sqlite3
         print()
         print("=== Committing signals + fills ===")
+        n_recorded = 0
         n_filled = 0
         n_blocked = 0
+        n_locked = 0
         for p, sig in signals:
-            sig_id = record_signal(conn, sig)
-            if not sig.would_trade:
-                continue
-            ok, reason = risk_check(conn, cfg, sig.pair_id)
-            if not ok:
-                n_blocked += 1
-                continue
-            simulate_fill(conn, sig_id, sig)
-            n_filled += 1
-        print(f"  signals recorded  : {len(signals)}")
+            try:
+                sig_id = record_signal(conn, sig)
+                if sig.would_trade:
+                    ok, reason = risk_check(conn, cfg, sig.pair_id)
+                    if ok:
+                        simulate_fill(conn, sig_id, sig)
+                        n_filled += 1
+                    else:
+                        n_blocked += 1
+                conn.commit()
+                n_recorded += 1
+            except _sqlite3.OperationalError as e:
+                conn.rollback()
+                n_locked += 1
+                logging.warning(
+                    "skipping %s: %s (continuing cycle)",
+                    sig.pair_id[:60], e,
+                )
+        print(f"  signals recorded  : {n_recorded}/{len(signals)}")
         print(f"  paper-filled      : {n_filled}")
         print(f"  risk-blocked      : {n_blocked}")
+        if n_locked:
+            print(f"  skipped on lock   : {n_locked}")
     return 0
 
 
