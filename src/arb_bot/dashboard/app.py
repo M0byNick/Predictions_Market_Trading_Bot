@@ -385,6 +385,43 @@ def create_app() -> Flask:
             status=request.form.get("status", "active"),
         ))
 
+    @app.post("/bulk_deactivate")
+    def bulk_deactivate():
+        """Bulk-mark approved pairs as inactive.
+
+        Used by /dry_run to cull data-quality fakes (stale prices, mis-
+        tagged polarity, settled-but-cached markets) in one click after
+        the operator inspects the scan.
+        """
+        ids_raw = request.form.get("pair_ids", "")
+        reason = request.form.get("reason", "bulk-deactivate from /dry_run")
+        pair_ids = [tok for tok in (s.strip() for s in ids_raw.split(",")) if tok]
+        if not pair_ids:
+            flash("No pairs selected.", "warning")
+            return redirect(url_for("dry_run"))
+
+        now_ts = int(time.time())
+        n_done = 0
+        with db() as conn:
+            with transaction(conn):
+                for pid in pair_ids:
+                    cur = conn.execute(
+                        "SELECT pair_id, notes, active FROM approved_pairs WHERE pair_id=?",
+                        (pid,),
+                    ).fetchone()
+                    if not cur or cur["active"] == 0:
+                        continue
+                    new_notes = cur["notes"] or ""
+                    sep = " | " if new_notes else ""
+                    new_notes = f"{new_notes}{sep}DEACTIVATED({now_ts}): {reason}"
+                    conn.execute(
+                        "UPDATE approved_pairs SET active=0, notes=? WHERE pair_id=?",
+                        (new_notes, pid),
+                    )
+                    n_done += 1
+        flash(f"Deactivated {n_done} pair(s).", "warning")
+        return redirect(request.form.get("return_to") or url_for("dry_run"))
+
     @app.post("/reactivate/<path:pair_id>")
     def reactivate_pair(pair_id: str):
         """Re-enable a previously-deactivated pair. Bot resumes scanning."""

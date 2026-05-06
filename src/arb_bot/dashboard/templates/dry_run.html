@@ -5,8 +5,11 @@
 <div class="card" style="background:#fafafa;">
   <p>
     Read-only one-shot scan against current market quotes from the latest
-    ingest. Shows what trades the bot <strong>would have made</strong>
-    if it ran a cycle right now. Does NOT persist anything.
+    ingest. Shows what trades the bot <strong>would have made</strong> if it
+    ran a cycle right now. Use the per-row or bulk
+    <strong>deactivate</strong> buttons to cull data-quality fakes (stale
+    prices, mis-tagged polarity, settled-but-cached markets) before
+    committing paper fills.
   </p>
   <form method="post" action="{{ url_for('run_now') }}" style="display:inline;">
     <button type="submit"
@@ -16,6 +19,8 @@
   </form>
   &nbsp;
   <a href="{{ url_for('dry_run') }}">Re-scan</a>
+  &nbsp;|&nbsp;
+  <a href="{{ url_for('approved_list', status='inactive') }}">View deactivated pairs</a>
 </div>
 
 <div class="row">
@@ -42,6 +47,13 @@
         {% else %}—{% endif %}
       </dd>
     </div>
+    {% if total_capital > 0 and (100.0 * total_expected_profit / total_capital) > 10 %}
+      <p style="color:var(--bad); margin-top:8px; font-size:13px;">
+        ⚠ Cycle ROI > 10% is suspiciously high — almost certainly stale
+        quotes or mis-tagged polarity. Inspect each &gt;10% edge below
+        and deactivate fakes before clicking <em>Run + commit</em>.
+      </p>
+    {% endif %}
   </div>
 
   <div class="card">
@@ -64,89 +76,167 @@
   </div>
 </div>
 
-<div class="card">
-  <h3>Top {{ rows_trade|length }} would-trade signals (ranked by edge)</h3>
-  {% if rows_trade %}
-  <table>
-    <thead>
-      <tr>
-        <th>Polarity</th>
-        <th>Kalshi YES</th>
-        <th>Poly YES</th>
-        <th>Spread</th>
-        <th>Edge</th>
-        <th>Direction</th>
-        <th>Units</th>
-        <th>Capital</th>
-        <th>Pair</th>
-      </tr>
-    </thead>
-    <tbody>
-    {% for r in rows_trade %}
-      <tr>
-        <td>
-          {% if r.polarity == 'same' %}<span class="pill pill-clean">same</span>
-          {% elif r.polarity == 'inverse' %}<span class="pill pill-med" style="background:#fde7c2;">inverse</span>
-          {% else %}<span class="pill pill-amb">?</span>{% endif %}
-        </td>
-        <td>{{ "%.3f" % r.kal_yes }}</td>
-        <td>{{ "%.3f" % r.poly_yes }}</td>
-        <td>{{ "%.3f" % r.raw_spread }}</td>
-        <td><strong>{{ "%.0f" % r.edge_bps }} bps</strong> ({{ "%.2f%%" % (r.edge_bps / 100) }})</td>
-        <td style="font-size:11px;">{{ r.direction.replace('_', ' ') }}</td>
-        <td>{{ r.size_units }}</td>
-        <td>${{ "%.2f" % r.target_capital }}</td>
-        <td style="font-size:12px; max-width:380px;">
-          <strong>K:</strong> {{ r.k_title[:48] }}<br>
-          <strong>P:</strong> {{ r.p_title[:48] }}
-        </td>
-      </tr>
-    {% endfor %}
-    </tbody>
-  </table>
-  {% else %}
-    <p class="muted">No would-trade signals — all approved pairs either lacked
-    fresh quotes or had insufficient edge after fees. Try lowering
-    PAPER_MIN_EDGE_BPS in <code>.env</code>, or wait for the hourly cron to
-    refresh prices.</p>
-  {% endif %}
-</div>
+<form method="post" action="{{ url_for('bulk_deactivate') }}" id="bulk-form">
+  <input type="hidden" name="pair_ids" id="pair_ids" value="">
+  <input type="hidden" name="return_to" value="{{ url_for('dry_run') }}">
 
-{% if rows_skip %}
-<div class="card">
-  <h3>Top {{ rows_skip|length }} skipped signals (close to threshold — for tuning)</h3>
-  <p class="muted" style="font-size:13px;">
-    These had a real spread but didn't meet PAPER_MIN_EDGE_BPS. Useful for
-    seeing how close the threshold is to the actual market edge.
-  </p>
-  <table>
-    <thead>
-      <tr>
-        <th>Polarity</th>
-        <th>Kalshi YES</th>
-        <th>Poly YES</th>
-        <th>Spread</th>
-        <th>Edge</th>
-        <th>Reject reason</th>
-      </tr>
-    </thead>
-    <tbody>
-    {% for r in rows_skip %}
-      <tr>
-        <td>
-          {% if r.polarity == 'same' %}<span class="pill pill-clean">same</span>
-          {% elif r.polarity == 'inverse' %}<span class="pill pill-med" style="background:#fde7c2;">inverse</span>
-          {% else %}<span class="pill pill-amb">?</span>{% endif %}
-        </td>
-        <td>{{ "%.3f" % r.kal_yes }}</td>
-        <td>{{ "%.3f" % r.poly_yes }}</td>
-        <td>{{ "%.3f" % r.raw_spread }}</td>
-        <td>{{ "%.0f" % r.edge_bps }} bps ({{ "%.2f%%" % (r.edge_bps / 100) }})</td>
-        <td style="font-size:11px;">{{ r.reject_reason }}</td>
-      </tr>
-    {% endfor %}
-    </tbody>
-  </table>
-</div>
-{% endif %}
+  <div class="card">
+    <h3>Top {{ rows_trade|length }} would-trade signals (ranked by edge)</h3>
+    {% if rows_trade %}
+    <div style="position:sticky; top:0; z-index:10; background:#fff; padding:8px; border-bottom:2px solid var(--line); margin-bottom:8px;">
+      <label><input type="checkbox" id="select-all-trade"> Select all</label>
+      &nbsp;&nbsp;<span id="count-trade">0</span> selected
+      &nbsp;&nbsp;
+      <input type="text" name="reason" placeholder="reason (e.g. 'stale Kalshi price')"
+             style="font-size:12px; padding:4px 8px; width:280px;">
+      <button type="submit" class="reject" onclick="return collectIds(this)">
+        Deactivate selected
+      </button>
+    </div>
+    <table>
+      <thead>
+        <tr>
+          <th><input type="checkbox" id="select-all-trade-2"></th>
+          <th>Polarity</th>
+          <th>Kalshi YES</th>
+          <th>Poly YES</th>
+          <th>Spread</th>
+          <th>Edge</th>
+          <th>Direction</th>
+          <th>Units</th>
+          <th>Capital</th>
+          <th>Pair</th>
+          <th>Action</th>
+        </tr>
+      </thead>
+      <tbody>
+      {% for r in rows_trade %}
+        <tr {% if r.edge_bps > 1000 %}style="background:#ffe7e7;"{% elif r.edge_bps > 500 %}style="background:#fef0e0;"{% endif %}>
+          <td><input type="checkbox" class="row-cb-trade" data-pid="{{ r.pair_id }}"></td>
+          <td>
+            {% if r.polarity == 'same' %}<span class="pill pill-clean">same</span>
+            {% elif r.polarity == 'inverse' %}<span class="pill pill-med" style="background:#fde7c2;">inverse</span>
+            {% else %}<span class="pill pill-amb">?</span>{% endif %}
+          </td>
+          <td>{{ "%.3f" % r.kal_yes }}</td>
+          <td>{{ "%.3f" % r.poly_yes }}</td>
+          <td>{{ "%.3f" % r.raw_spread }}</td>
+          <td>
+            <strong>{{ "%.0f" % r.edge_bps }} bps</strong>
+            ({{ "%.2f%%" % (r.edge_bps / 100) }})
+            {% if r.edge_bps > 1000 %}
+              <span style="color:var(--bad); font-size:11px;">⚠ likely fake</span>
+            {% endif %}
+          </td>
+          <td style="font-size:11px;">{{ r.direction.replace('_', ' ') }}</td>
+          <td>{{ r.size_units }}</td>
+          <td>${{ "%.2f" % r.target_capital }}</td>
+          <td style="font-size:11px; max-width:340px;">
+            <strong>K:</strong> {{ r.k_title[:54] }}<br>
+            <strong>P:</strong> {{ r.p_title[:54] }}
+          </td>
+          <td>
+            <button type="button" class="reject single-deact"
+                    data-pid="{{ r.pair_id }}"
+                    style="font-size:10px; padding:2px 6px;">deact</button>
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+      <p class="muted">No would-trade signals — all approved pairs either lacked
+      fresh quotes or had insufficient edge after fees. Try refreshing quotes
+      via the hourly cron, or lower PAPER_MIN_EDGE_BPS in <code>.env</code>.</p>
+    {% endif %}
+  </div>
+
+  {% if rows_skip %}
+  <div class="card">
+    <h3>Top {{ rows_skip|length }} skipped signals (close to threshold — for tuning)</h3>
+    <p class="muted" style="font-size:13px;">
+      These had a real spread but didn't meet PAPER_MIN_EDGE_BPS. Useful for
+      seeing how close the threshold is to the actual market edge.
+    </p>
+    <table>
+      <thead>
+        <tr>
+          <th>Polarity</th>
+          <th>Kalshi YES</th>
+          <th>Poly YES</th>
+          <th>Spread</th>
+          <th>Edge</th>
+          <th>Reject reason</th>
+        </tr>
+      </thead>
+      <tbody>
+      {% for r in rows_skip %}
+        <tr>
+          <td>
+            {% if r.polarity == 'same' %}<span class="pill pill-clean">same</span>
+            {% elif r.polarity == 'inverse' %}<span class="pill pill-med" style="background:#fde7c2;">inverse</span>
+            {% else %}<span class="pill pill-amb">?</span>{% endif %}
+          </td>
+          <td>{{ "%.3f" % r.kal_yes }}</td>
+          <td>{{ "%.3f" % r.poly_yes }}</td>
+          <td>{{ "%.3f" % r.raw_spread }}</td>
+          <td>{{ "%.0f" % r.edge_bps }} bps ({{ "%.2f%%" % (r.edge_bps / 100) }})</td>
+          <td style="font-size:11px;">{{ r.reject_reason }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+</form>
+
+<script>
+const cbAll = document.getElementById('select-all-trade');
+const cbAll2 = document.getElementById('select-all-trade-2');
+const rowCbs = document.querySelectorAll('.row-cb-trade');
+const countEl = document.getElementById('count-trade');
+
+function refreshCount() {
+  if (!countEl) return;
+  countEl.textContent = document.querySelectorAll('.row-cb-trade:checked').length;
+}
+[cbAll, cbAll2].forEach(top => {
+  if (!top) return;
+  top.addEventListener('change', e => {
+    rowCbs.forEach(cb => cb.checked = e.target.checked);
+    refreshCount();
+  });
+});
+rowCbs.forEach(cb => cb.addEventListener('change', refreshCount));
+
+function collectIds(btn) {
+  const ids = Array.from(document.querySelectorAll('.row-cb-trade:checked'))
+    .map(cb => cb.dataset.pid);
+  document.getElementById('pair_ids').value = ids.join(',');
+  if (ids.length === 0) {
+    alert('No pairs selected.');
+    return false;
+  }
+  return confirm(`Deactivate ${ids.length} pair(s)? They'll be hidden from /dry_run and the bot will skip them. Reactivate from /approved?status=inactive.`);
+}
+
+// Single-row "deact" buttons: submit a one-pair POST
+document.querySelectorAll('.single-deact').forEach(btn => {
+  btn.addEventListener('click', e => {
+    e.preventDefault();
+    const pid = btn.dataset.pid;
+    if (!confirm(`Deactivate ${pid.slice(0, 60)}?`)) return;
+    const reasonInput = document.querySelector('input[name="reason"]');
+    const reason = reasonInput ? reasonInput.value : '';
+    const form = document.createElement('form');
+    form.method = 'POST';
+    form.action = '/deactivate/' + encodeURIComponent(pid);
+    const t = document.createElement('input');
+    t.name = 'reason'; t.value = reason || 'single-deact from /dry_run';
+    form.appendChild(t);
+    document.body.appendChild(form);
+    form.submit();
+  });
+});
+</script>
 {% endblock %}
