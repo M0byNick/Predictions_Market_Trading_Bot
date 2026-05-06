@@ -67,6 +67,11 @@ class Config:
     # last_seen_ts is older than this. Prevents fake arbs on stale prices
     # from settled-but-cached markets. Default 2h.
     max_quote_age_sec: int
+    # Slippage budget per leg in bps. Real fills cross the spread + eat
+    # tick-size depth on both legs; paper-mode fills assume mid prices, so
+    # we deduct 2x this from realized edge before deciding to trade. Tighten
+    # after live data; conservative default = 50 bps/leg = 100 bps round-trip.
+    slippage_bps_per_leg: int
 
     # Mapping
     embed_model: str
@@ -150,6 +155,7 @@ def load_config() -> Config:
         paper_daily_max_loss_pct=_env_float("PAPER_DAILY_MAX_LOSS_PCT", 0.05),
         paper_min_edge_bps=_env_int("PAPER_MIN_EDGE_BPS", 200),
         max_quote_age_sec=_env_int("MAX_QUOTE_AGE_SEC", 7200),
+        slippage_bps_per_leg=_env_int("SLIPPAGE_BPS_PER_LEG", 50),
         embed_model=_env("EMBED_MODEL", "BAAI/bge-small-en-v1.5"),
         embed_cosine_threshold=_env_float("EMBED_COSINE_THRESHOLD", 0.75),
         candidate_top_k=_env_int("CANDIDATE_TOP_K", 5),
