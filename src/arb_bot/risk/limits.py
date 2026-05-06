@@ -16,32 +16,33 @@ def _day_start_ts() -> int:
 
 
 def daily_pnl_usd(conn: sqlite3.Connection) -> float:
-    """Naive paper PnL: sum of (sell price - buy price) * size - fees since UTC midnight.
+    """Realized paper PnL since UTC midnight.
 
-    Phase 2: replace with mark-to-market against live quotes + realized-at-resolution.
+    Sums realized_pnl_usd from all paper_fills SETTLED today. Open
+    positions don't contribute (their realized_pnl_usd is NULL until
+    settle_paper_fills.py picks them up).
     """
     start = _day_start_ts()
-    fills = conn.execute(
+    row = conn.execute(
         """
-        SELECT leg, side, price_filled, size_filled, fees_usd
-        FROM paper_fills WHERE ts >= ? AND state = 'filled'
+        SELECT COALESCE(SUM(realized_pnl_usd), 0.0) AS pnl
+        FROM paper_fills
+        WHERE settled_ts >= ? AND realized_outcome IS NOT NULL
         """,
         (start,),
-    ).fetchall()
-    pnl = 0.0
-    for f in fills:
-        direction = 1.0 if f["side"] == "sell" else -1.0
-        pnl += direction * f["price_filled"] * f["size_filled"]
-        pnl -= f["fees_usd"] or 0.0
-    return pnl
+    ).fetchone()
+    return row["pnl"] if row else 0.0
 
 
 def open_position_usd(conn: sqlite3.Connection, pair_id: str) -> float:
-    """Approx open notional on a pair: sum of |size_filled * price_filled|
-    across unsettled fills. Placeholder until settlement tracking exists.
+    """Open notional on a pair: sum of |size_filled * price_filled| across
+    UNSETTLED fills only. Settled positions (realized_outcome set) no
+    longer occupy capital; the bot can re-enter the pair on the next
+    cycle if a fresh signal appears.
     """
     rows = conn.execute(
-        "SELECT price_filled, size_filled FROM paper_fills WHERE pair_id=? AND state='filled'",
+        "SELECT price_filled, size_filled FROM paper_fills "
+        "WHERE pair_id=? AND state='filled' AND realized_outcome IS NULL",
         (pair_id,),
     ).fetchall()
     return sum((r["price_filled"] or 0) * (r["size_filled"] or 0) for r in rows)
