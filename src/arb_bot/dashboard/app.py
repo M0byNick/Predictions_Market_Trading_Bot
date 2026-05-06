@@ -827,6 +827,9 @@ def create_app() -> Flask:
                     "FROM markets WHERE venue='poly_global' AND venue_market_id=?",
                     (p["poly_global_market_id"],),
                 ).fetchone()
+                now_ts = int(time.time())
+                k_last = (kal["last_seen_ts"] if kal else None)
+                p_last = (poly["last_seen_ts"] if poly else None)
                 rows.append({
                     "pair_id": sig.pair_id,
                     "kalshi_ticker": p["kalshi_ticker"],
@@ -855,8 +858,14 @@ def create_app() -> Flask:
                     "p_volume": (poly["volume"] if poly else 0) or 0,
                     "k_status": (kal["status"] if kal else "") or "",
                     "p_status": (poly["status"] if poly else "") or "",
-                    "k_last_seen": (kal["last_seen_ts"] if kal else None),
-                    "p_last_seen": (poly["last_seen_ts"] if poly else None),
+                    "k_last_seen": k_last,
+                    "p_last_seen": p_last,
+                    "k_age_min": (now_ts - k_last) // 60 if k_last else None,
+                    "p_age_min": (now_ts - p_last) // 60 if p_last else None,
+                    "max_age_min": max(
+                        (now_ts - k_last) // 60 if k_last else 0,
+                        (now_ts - p_last) // 60 if p_last else 0,
+                    ),
                 })
 
         # Top opportunities by fee-adjusted edge — only would-trade signals
@@ -884,6 +893,37 @@ def create_app() -> Flask:
             total_capital=total_capital,
             total_expected_profit=total_expected_profit,
         )
+
+    @app.post("/refresh_quotes")
+    def refresh_quotes():
+        """Run a fresh ingest cycle (Kalshi + Polymarket) and redirect back.
+
+        Triggered by the 'Refresh quotes now' button on /dry_run. Takes
+        roughly 5-7 minutes; the user gets a flash message confirming
+        the run started in the background.
+        """
+        import subprocess
+        cfg = app.config["ARB_CFG"]
+        log_path = cfg.data_dir / "logs" / "manual_refresh.log"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        # Fire-and-forget: launch the refresh in the background so the
+        # HTTP handler returns immediately. The cron's hourly :15 entry
+        # does the same thing on a schedule; this just lets the
+        # operator trigger it ad-hoc.
+        venv_python = Path(__file__).resolve().parents[3] / ".venv" / "bin" / "python"
+        script = Path(__file__).resolve().parents[3] / "scripts" / "run_daily_pipeline.py"
+        with open(log_path, "ab") as logf:
+            subprocess.Popen(
+                [str(venv_python), str(script), "--skip-batch"],
+                stdout=logf, stderr=subprocess.STDOUT,
+                cwd=str(Path(__file__).resolve().parents[3]),
+            )
+        flash(
+            "Quote refresh started in the background (5-7 min). "
+            "Re-load /dry_run after a few minutes to see updated prices.",
+            "success",
+        )
+        return redirect(url_for("dry_run"))
 
     @app.post("/run_now")
     def run_now():

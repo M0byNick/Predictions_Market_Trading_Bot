@@ -18,9 +18,21 @@
     </button>
   </form>
   &nbsp;
-  <a href="{{ url_for('dry_run') }}">Re-scan</a>
+  <form method="post" action="{{ url_for('refresh_quotes') }}" style="display:inline;">
+    <button type="submit" style="background:#2a4a82;"
+            onclick="return confirm('Trigger a fresh Kalshi + Polymarket ingest? Takes 5-7 min in the background.')">
+      Refresh quotes now
+    </button>
+  </form>
+  &nbsp;
+  <a href="{{ url_for('dry_run') }}">Re-scan (without refresh)</a>
   &nbsp;|&nbsp;
   <a href="{{ url_for('approved_list', status='inactive') }}">View deactivated pairs</a>
+  <div class="muted" style="margin-top:8px; font-size:12px;">
+    ⚠ Prices below are from the bot's <strong>cached database</strong>, not live order books.
+    The hourly cron refreshes at :15. If a pair's age column is high (60+ min), click
+    <em>Refresh quotes now</em> before relying on the edge calc.
+  </div>
 </div>
 
 <div class="row">
@@ -102,6 +114,7 @@
           <th>Polarity</th>
           <th>Kalshi YES</th>
           <th>Poly YES</th>
+          <th>Age (min)</th>
           <th>Spread</th>
           <th>Edge</th>
           <th>Direction</th>
@@ -122,6 +135,12 @@
           </td>
           <td>{{ "%.3f" % r.kal_yes }}</td>
           <td>{{ "%.3f" % r.poly_yes }}</td>
+          <td style="font-size:11px;">
+            <span style="{% if r.max_age_min > 90 %}color:var(--bad); font-weight:bold;{% elif r.max_age_min > 30 %}color:var(--warn);{% else %}color:var(--ok);{% endif %}">
+              K: {{ r.k_age_min if r.k_age_min is not none else '?' }}<br>
+              P: {{ r.p_age_min if r.p_age_min is not none else '?' }}
+            </span>
+          </td>
           <td>{{ "%.3f" % r.raw_spread }}</td>
           <td>
             <strong>{{ "%.0f" % r.edge_bps }} bps</strong>
@@ -144,7 +163,7 @@
           </td>
         </tr>
         <tr {% if r.edge_bps > 1000 %}style="background:#ffe7e7;"{% elif r.edge_bps > 500 %}style="background:#fef0e0;"{% endif %}>
-          <td colspan="11" style="padding:0;">
+          <td colspan="12" style="padding:0;">
             <details class="rules-details">
               <summary style="cursor:pointer; padding:6px 12px; color:#666; font-size:12px; user-select:none;">
                 ▸ show full rules + resolution criteria + market metadata
