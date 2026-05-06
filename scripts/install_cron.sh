@@ -19,6 +19,7 @@ LOGDIR="$ARB_BOT/data/logs"
 DAILY="0 3 * * * cd \"$ARB_BOT\" && \"$PYTHON\" \"$ARB_BOT/scripts/run_daily_pipeline.py\" >> \"$LOGDIR/cron_daily.out\" 2>&1"
 COLLECT="*/30 5-23 * * * cd \"$ARB_BOT\" && \"$PYTHON\" \"$ARB_BOT/scripts/run_collection.py\" >> \"$LOGDIR/cron_collection.out\" 2>&1"
 HOURLY_INGEST="15 * * * * cd \"$ARB_BOT\" && \"$PYTHON\" \"$ARB_BOT/scripts/run_daily_pipeline.py\" --skip-batch >> \"$LOGDIR/cron_hourly.out\" 2>&1"
+SETTLE="45 4 * * * cd \"$ARB_BOT\" && \"$PYTHON\" \"$ARB_BOT/scripts/settle_paper_fills.py\" >> \"$LOGDIR/cron_settle.out\" 2>&1"
 
 echo "=== Proposed cron entries (Arb_Bot pipeline) ==="
 echo
@@ -31,13 +32,16 @@ echo
 echo "# Every hour at :15 — refresh market data only (no LLM cost)"
 echo "$HOURLY_INGEST"
 echo
+echo "# 04:45 UTC daily — settle paper fills against resolved markets"
+echo "$SETTLE"
+echo
 
 if [[ "${1:-}" == "--apply" ]]; then
     mkdir -p "$LOGDIR"
     # Remove any prior arb_bot lines, then append new ones
-    EXISTING="$(crontab -l 2>/dev/null | grep -v 'Arb_Bot/scripts/run_' || true)"
-    NEW=$(printf "%s\n# Arb_Bot daily pipeline (auto-installed)\n%s\n%s\n%s\n" \
-        "$EXISTING" "$DAILY" "$COLLECT" "$HOURLY_INGEST")
+    EXISTING="$(crontab -l 2>/dev/null | grep -v 'Arb_Bot/scripts/' || true)"
+    NEW=$(printf "%s\n# Arb_Bot daily pipeline (auto-installed)\n%s\n%s\n%s\n%s\n" \
+        "$EXISTING" "$DAILY" "$COLLECT" "$HOURLY_INGEST" "$SETTLE")
     echo "$NEW" | crontab -
     echo "INSTALLED. Verify with: crontab -l"
 else

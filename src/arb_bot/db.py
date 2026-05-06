@@ -134,8 +134,16 @@ CREATE TABLE IF NOT EXISTS paper_fills (
     fees_usd REAL,
     ts INTEGER NOT NULL,
     state TEXT NOT NULL,
+    -- Settlement (filled in by scripts/settle_paper_fills.py once the
+    -- underlying market resolves). NULL while the position is open.
+    realized_outcome TEXT,         -- 'yes' | 'no' | 'void'
+    realized_pnl_usd REAL,         -- net of fees, this leg only
+    settled_ts INTEGER,
+    settle_method TEXT,            -- 'price_extreme' | 'venue_status' | 'manual'
     FOREIGN KEY (signal_id) REFERENCES paper_signals(id)
 );
+-- (idx_paper_fills_realized + idx_paper_fills_pair created post-ALTER in
+-- init_schema, since older DBs may need the column added before the index.)
 
 CREATE TABLE IF NOT EXISTS ingestion_runs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -185,6 +193,25 @@ def init_schema(db_path: Path) -> None:
             conn.execute("ALTER TABLE rejected_pairs ADD COLUMN verdict_id INTEGER")
         if "decision_context" not in rejected_cols:
             conn.execute("ALTER TABLE rejected_pairs ADD COLUMN decision_context TEXT")
+        # paper_fills settlement columns (idempotent)
+        fill_cols = {r["name"] for r in conn.execute("PRAGMA table_info(paper_fills)")}
+        if "realized_outcome" not in fill_cols:
+            conn.execute("ALTER TABLE paper_fills ADD COLUMN realized_outcome TEXT")
+        if "realized_pnl_usd" not in fill_cols:
+            conn.execute("ALTER TABLE paper_fills ADD COLUMN realized_pnl_usd REAL")
+        if "settled_ts" not in fill_cols:
+            conn.execute("ALTER TABLE paper_fills ADD COLUMN settled_ts INTEGER")
+        if "settle_method" not in fill_cols:
+            conn.execute("ALTER TABLE paper_fills ADD COLUMN settle_method TEXT")
+        # Indices on the now-guaranteed columns (after the ALTERs above).
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_paper_fills_realized "
+            "ON paper_fills(realized_outcome)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_paper_fills_pair "
+            "ON paper_fills(pair_id)"
+        )
         conn.commit()
 
 

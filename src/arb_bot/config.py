@@ -63,6 +63,10 @@ class Config:
     paper_min_position_usd: float        # below this, slippage eats the trade — skip
     paper_daily_max_loss_pct: float      # daily loss stop, as fraction of bankroll
     paper_min_edge_bps: int
+    # Quote-freshness guard: refuse to compute a signal when EITHER venue's
+    # last_seen_ts is older than this. Prevents fake arbs on stale prices
+    # from settled-but-cached markets. Default 2h.
+    max_quote_age_sec: int
 
     # Mapping
     embed_model: str
@@ -145,6 +149,7 @@ def load_config() -> Config:
         paper_min_position_usd=_env_float("PAPER_MIN_POSITION_USD", 25.0),
         paper_daily_max_loss_pct=_env_float("PAPER_DAILY_MAX_LOSS_PCT", 0.05),
         paper_min_edge_bps=_env_int("PAPER_MIN_EDGE_BPS", 200),
+        max_quote_age_sec=_env_int("MAX_QUOTE_AGE_SEC", 7200),
         embed_model=_env("EMBED_MODEL", "BAAI/bge-small-en-v1.5"),
         embed_cosine_threshold=_env_float("EMBED_COSINE_THRESHOLD", 0.75),
         candidate_top_k=_env_int("CANDIDATE_TOP_K", 5),

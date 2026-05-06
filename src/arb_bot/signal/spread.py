@@ -147,15 +147,60 @@ def _detect_inverse_polarity(
 
 def detect_for_pair(conn: sqlite3.Connection, cfg: Config, pair_row: sqlite3.Row) -> ArbSignal | None:
     kal = conn.execute(
-        "SELECT yes_bid, yes_ask FROM markets WHERE venue='kalshi' AND venue_market_id=?",
+        "SELECT yes_bid, yes_ask, last_seen_ts, status "
+        "FROM markets WHERE venue='kalshi' AND venue_market_id=?",
         (pair_row["kalshi_ticker"],),
     ).fetchone()
     poly = conn.execute(
-        "SELECT yes_bid, yes_ask FROM markets WHERE venue='poly_global' AND venue_market_id=?",
+        "SELECT yes_bid, yes_ask, last_seen_ts, status "
+        "FROM markets WHERE venue='poly_global' AND venue_market_id=?",
         (pair_row["poly_global_market_id"],),
     ).fetchone()
     if not kal or not poly:
         return None
+
+    # Stale-price guard: if either venue's last_seen_ts is older than the
+    # configured threshold, refuse to signal. Prevents fake arbs from
+    # settled-but-cached or delisted markets where the quote in the DB is
+    # no longer reachable on the venue's order book.
+    now_ts = int(time.time())
+    kal_age = now_ts - (kal["last_seen_ts"] or 0)
+    poly_age = now_ts - (poly["last_seen_ts"] or 0)
+    if kal_age > cfg.max_quote_age_sec or poly_age > cfg.max_quote_age_sec:
+        kal_min = kal_age // 60
+        poly_min = poly_age // 60
+        return ArbSignal(
+            pair_id=pair_row["pair_id"],
+            polarity=pair_row["match_polarity"] if "match_polarity" in pair_row.keys() else "unknown",
+            kalshi_yes_mid=_mid(kal["yes_bid"], kal["yes_ask"]) or 0.0,
+            poly_yes_mid=_mid(poly["yes_bid"], poly["yes_ask"]) or 0.0,
+            raw_spread=0.0,
+            fee_adjusted_edge_bps=0.0,
+            direction="skip_stale_quote",
+            size_units=0,
+            target_capital_usd=0.0,
+            would_trade=False,
+            reject_reason=f"stale quote: kal={kal_min}min poly={poly_min}min old "
+                          f"(threshold {cfg.max_quote_age_sec // 60}min)",
+        )
+
+    # Resolved-market filter: skip pairs where either side's status is
+    # not 'open' (closed / resolved / finalized markets).
+    if (kal["status"] or "").lower() not in ("open", "active") or \
+       (poly["status"] or "").lower() not in ("open", "active"):
+        return ArbSignal(
+            pair_id=pair_row["pair_id"],
+            polarity=pair_row["match_polarity"] if "match_polarity" in pair_row.keys() else "unknown",
+            kalshi_yes_mid=_mid(kal["yes_bid"], kal["yes_ask"]) or 0.0,
+            poly_yes_mid=_mid(poly["yes_bid"], poly["yes_ask"]) or 0.0,
+            raw_spread=0.0,
+            fee_adjusted_edge_bps=0.0,
+            direction="skip_market_closed",
+            size_units=0,
+            target_capital_usd=0.0,
+            would_trade=False,
+            reject_reason=f"market closed/resolved: kal={kal['status']} poly={poly['status']}",
+        )
 
     kal_mid = _mid(kal["yes_bid"], kal["yes_ask"])
     poly_mid = _mid(poly["yes_bid"], poly["yes_ask"])
