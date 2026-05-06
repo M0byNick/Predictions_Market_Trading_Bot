@@ -25,6 +25,11 @@ SIGNAL_CYCLE="*/30 * * * * cd \"$ARB_BOT\" && \"$PYTHON\" \"$ARB_BOT/scripts/dry
 # Hourly @ :40 -- runs AFTER hourly gamma ingest @ :15 (for fresh metadata)
 # and BEFORE the :00 signal cycle (so signals see fresh CLOB prices).
 POLY_CLOB="40 * * * * cd \"$ARB_BOT\" && \"$PYTHON\" \"$ARB_BOT/scripts/refresh_poly_clob.py\" >> \"$LOGDIR/cron_poly_clob.out\" 2>&1"
+# Stale-pair sweep -- daily 04:30 UTC, before settle (04:45). Deactivates
+# approved pairs where BOTH legs have last_seen_ts > 72h. Auditable:
+# active=0 + tagged note appended. Catches markets that closed on either
+# venue without us noticing.
+SWEEP_STALE="30 4 * * * cd \"$ARB_BOT\" && \"$PYTHON\" \"$ARB_BOT/scripts/sweep_stale_pairs.py\" --apply >> \"$LOGDIR/cron_sweep_stale.out\" 2>&1"
 
 echo "=== Proposed cron entries (Arb_Bot pipeline) ==="
 echo
@@ -46,13 +51,16 @@ echo
 echo "# Every hour at :40 — refresh Polymarket prices via CLOB (gamma is stale)"
 echo "$POLY_CLOB"
 echo
+echo "# 04:30 UTC daily — deactivate pairs whose both legs are >72h stale"
+echo "$SWEEP_STALE"
+echo
 
 if [[ "${1:-}" == "--apply" ]]; then
     mkdir -p "$LOGDIR"
     # Remove any prior arb_bot lines, then append new ones
     EXISTING="$(crontab -l 2>/dev/null | grep -v 'Arb_Bot/scripts/' || true)"
-    NEW=$(printf "%s\n# Arb_Bot daily pipeline (auto-installed)\n%s\n%s\n%s\n%s\n%s\n%s\n" \
-        "$EXISTING" "$DAILY" "$COLLECT" "$HOURLY_INGEST" "$SETTLE" "$SIGNAL_CYCLE" "$POLY_CLOB")
+    NEW=$(printf "%s\n# Arb_Bot daily pipeline (auto-installed)\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n" \
+        "$EXISTING" "$DAILY" "$COLLECT" "$HOURLY_INGEST" "$SETTLE" "$SIGNAL_CYCLE" "$POLY_CLOB" "$SWEEP_STALE")
     echo "$NEW" | crontab -
     echo "INSTALLED. Verify with: crontab -l"
 else

@@ -925,6 +925,53 @@ def create_app() -> Flask:
         )
         return redirect(url_for("dry_run"))
 
+    @app.post("/sweep_stale")
+    def sweep_stale():
+        """Deactivate pairs whose both legs are stale beyond threshold_hours.
+
+        Synchronous; runs the same SQL as scripts/sweep_stale_pairs.py.
+        Default threshold 72h matches the CLI default. Triggered from
+        the 'Sweep stale pairs' button on /ws_status.
+        """
+        threshold_hours = float(request.form.get("threshold_hours", "72"))
+        threshold_sec = int(threshold_hours * 3600)
+        now_ts = int(time.time())
+        cutoff = now_ts - threshold_sec
+        with db() as conn:
+            rows = conn.execute(
+                """
+                SELECT ap.pair_id
+                FROM approved_pairs ap
+                LEFT JOIN markets km
+                      ON km.venue='kalshi'      AND km.venue_market_id=ap.kalshi_ticker
+                LEFT JOIN markets pm
+                      ON pm.venue='poly_global' AND pm.venue_market_id=ap.poly_global_market_id
+                WHERE ap.active=1
+                  AND (km.last_seen_ts IS NULL OR km.last_seen_ts < ?)
+                  AND (pm.last_seen_ts IS NULL OR pm.last_seen_ts < ?)
+                """,
+                (cutoff, cutoff),
+            ).fetchall()
+            note = (
+                f"\n[auto-deactivated by /sweep_stale at {now_ts}: "
+                f"both legs stale > {threshold_hours}h]"
+            )
+            n = 0
+            for r in rows:
+                conn.execute(
+                    "UPDATE approved_pairs SET active=0, "
+                    "notes=COALESCE(notes,'') || ? WHERE pair_id=?",
+                    (note, r["pair_id"]),
+                )
+                n += 1
+            conn.commit()
+        if n:
+            flash(f"Deactivated {n} stale pair(s) (>{threshold_hours:g}h on both legs).",
+                  "success")
+        else:
+            flash(f"No pairs above {threshold_hours:g}h staleness.", "warning")
+        return redirect(url_for("ws_status"))
+
     @app.route("/ws_status")
     def ws_status():
         """Health page for the Polymarket WebSocket listener.

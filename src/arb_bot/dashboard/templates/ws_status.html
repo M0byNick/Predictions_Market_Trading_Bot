@@ -139,6 +139,19 @@
     </tr>
     {% endfor %}
   </table>
+
+  <div style="margin-top:14px; display:flex; gap:10px; align-items:center;">
+    <form method="post" action="{{ url_for('sweep_stale') }}" style="display:flex; gap:8px; align-items:center;"
+          onsubmit="return confirm('Deactivate all approved pairs whose BOTH legs are stale beyond the threshold? This is reversible (active=0, audit note appended).');">
+      <label class="muted" style="font-size:13px;">Threshold (hours):</label>
+      <input type="number" name="threshold_hours" value="72" min="2" max="720"
+             style="width:80px; padding:6px;">
+      <button type="submit">Sweep stale pairs</button>
+    </form>
+    <span class="muted" style="font-size:12px;">
+      Default 72h. The :30 daily cron runs the same sweep automatically.
+    </span>
+  </div>
 </div>
 {% endif %}
 
