@@ -131,15 +131,41 @@ def main() -> int:
         # against the dashboard or hourly ingest costs us 1 row, not the
         # whole cycle. Without this, sqlite WAL contention can roll back
         # 400+ accumulated signals.
+        #
+        # Pre-fill validation: every would_trade signal is re-checked
+        # against fresh live bid/ask before simulate_fill. The cycle's
+        # cached prices are mid-based and may not reflect realistic
+        # executable spread (especially for thin Polymarket books or
+        # stale Kalshi quotes). validate_pair_now() does ~2 HTTP calls
+        # per signal -- cheap because would_trade signals are 5-10 per
+        # cycle, not 460.
         import sqlite3 as _sqlite3
+        from arb_bot.signal.validate import validate_pair_now
         print()
         print("=== Committing signals + fills ===")
         n_recorded = 0
         n_filled = 0
         n_blocked = 0
         n_locked = 0
+        n_validation_skip = 0
         for p, sig in signals:
             try:
+                if sig.would_trade:
+                    # Pre-flight: re-validate with fresh quotes
+                    v = validate_pair_now(conn=conn, cfg=cfg, pair_id=sig.pair_id)
+                    if not v.is_arb_now:
+                        # Override the would_trade flag so the row records
+                        # accurately as a no-trade with the validation reason.
+                        sig.would_trade = False
+                        sig.reject_reason = (
+                            f"pre-flight validation: {v.reason} "
+                            f"(exec_edge={v.executable_edge_bps:+.0f}bps)"
+                        )
+                        n_validation_skip += 1
+                        logging.info(
+                            "skip on validation %s: %s",
+                            sig.pair_id[:60], v.reason,
+                        )
                 sig_id = record_signal(conn, sig)
                 if sig.would_trade:
                     ok, reason = risk_check(conn, cfg, sig.pair_id)
@@ -157,11 +183,12 @@ def main() -> int:
                     "skipping %s: %s (continuing cycle)",
                     sig.pair_id[:60], e,
                 )
-        print(f"  signals recorded  : {n_recorded}/{len(signals)}")
-        print(f"  paper-filled      : {n_filled}")
-        print(f"  risk-blocked      : {n_blocked}")
+        print(f"  signals recorded     : {n_recorded}/{len(signals)}")
+        print(f"  paper-filled         : {n_filled}")
+        print(f"  risk-blocked         : {n_blocked}")
+        print(f"  skipped on validation: {n_validation_skip}  (mid-deceptive cached spread)")
         if n_locked:
-            print(f"  skipped on lock   : {n_locked}")
+            print(f"  skipped on lock      : {n_locked}")
     return 0
 
 
