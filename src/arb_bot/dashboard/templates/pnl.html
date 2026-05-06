@@ -1,0 +1,185 @@
+{% extends "base.html" %}
+{% block content %}
+
+<h1>Paper PnL</h1>
+<p class="muted" style="margin-top:-8px;">
+  Realized + unrealized mark-to-market across all open + settled paper trades.
+  Excludes the {{ metrics.fills_wiped }} fills tagged
+  <code>WIPED_PHANTOM_GAMMA</code> (data-integrity wipe, not real outcomes).
+  As of {{ as_of_ts | int }}.
+</p>
+
+<div class="row">
+  <div class="card">
+    <h3>Total PnL (realized + unrealized mid-mtm)</h3>
+    <p style="font-size:36px; font-weight:700; margin:4px 0;
+              color:{{ 'var(--ok)' if metrics.total_pnl_mid >= 0 else 'var(--bad)' }};">
+      ${{ "%.2f"|format(metrics.total_pnl_mid) }}
+    </p>
+    <dl class="kv" style="margin-top:8px;">
+      <dt>Realized (settled)</dt>
+      <dd style="color:{{ 'var(--ok)' if metrics.realized_pnl_total >= 0 else 'var(--bad)' }};">
+        ${{ "%.2f"|format(metrics.realized_pnl_total) }}
+      </dd>
+      <dt>Realized today</dt>
+      <dd>${{ "%.2f"|format(metrics.realized_pnl_today) }}</dd>
+      <dt>Unrealized (mid-mtm)</dt>
+      <dd style="color:{{ 'var(--ok)' if metrics.unrealized_pnl_mid >= 0 else 'var(--bad)' }};">
+        ${{ "%.2f"|format(metrics.unrealized_pnl_mid) }}
+      </dd>
+      <dt>Unrealized (exec close)</dt>
+      <dd style="color:{{ 'var(--ok)' if metrics.unrealized_pnl_executable >= 0 else 'var(--bad)' }};">
+        ${{ "%.2f"|format(metrics.unrealized_pnl_executable) }}
+      </dd>
+    </dl>
+    <p class="muted" style="font-size:11px; margin-top:8px;">
+      <strong>mid-mtm</strong> values both legs at midpoint of bid/ask
+      (textbook convention; can overstate). <strong>exec close</strong>
+      values longs at bid + shorts at ask — what you'd actually realize
+      if you closed every position right now. The gap between the two
+      is your liquidity tax.
+    </p>
+  </div>
+
+  <div class="card">
+    <h3>Position state</h3>
+    <dl class="kv">
+      <dt>Open positions</dt>
+      <dd>{{ metrics.open_positions_count }} pairs / {{ metrics.fills_open }} fills</dd>
+      <dt>Open capital deployed</dt>
+      <dd>${{ "%.2f"|format(metrics.open_capital_usd) }}</dd>
+      <dt>Settled fills</dt>
+      <dd>{{ metrics.fills_settled }}</dd>
+      <dt>Wiped fills (audit)</dt>
+      <dd class="muted">{{ metrics.fills_wiped }}</dd>
+      <dt>Total fills lifetime</dt>
+      <dd>{{ metrics.fills_total }}</dd>
+    </dl>
+  </div>
+</div>
+
+<div class="card">
+  <h3>Open positions ({{ open_positions|length }})</h3>
+  <p class="muted" style="margin-top:-4px;">
+    Sorted worst-loser-first so risk is visible immediately. Click pair_id
+    to see its review verdict. Both legs of each pair are summed.
+  </p>
+  {% if not open_positions %}
+  <p>No open positions.</p>
+  {% else %}
+  <table>
+    <thead>
+      <tr>
+        <th>Pair</th>
+        <th>Title</th>
+        <th>K entry → now</th>
+        <th>P entry → now</th>
+        <th style="text-align:right;">Cap</th>
+        <th style="text-align:right;">Unrealized (mid)</th>
+        <th style="text-align:right;">Unrealized (exec)</th>
+        <th style="text-align:right;">Days held</th>
+        <th style="text-align:right;">Days to resolve</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for p in open_positions %}
+      <tr>
+        <td><code style="font-size:11px;">{{ p.kalshi_ticker[:28] }}</code></td>
+        <td style="font-size:12px;">{{ p.title }}</td>
+        <td style="font-size:12px;">
+          {{ p.k_entry_side[:1].upper() }}@{{ "%.3f"|format(p.k_entry_price) if p.k_entry_price is not none else '?' }}
+          → {{ "%.3f"|format(p.k_mid) if p.k_mid is not none else '?' }}
+        </td>
+        <td style="font-size:12px;">
+          {{ p.p_entry_side[:1].upper() }}@{{ "%.3f"|format(p.p_entry_price) if p.p_entry_price is not none else '?' }}
+          → {{ "%.3f"|format(p.p_mid) if p.p_mid is not none else '?' }}
+        </td>
+        <td style="text-align:right;">${{ "%.2f"|format(p.entry_capital_usd) }}</td>
+        <td style="text-align:right; color:{{ 'var(--ok)' if p.unrealized_mid >= 0 else 'var(--bad)' }}; font-weight:600;">
+          ${{ "%.2f"|format(p.unrealized_mid) }}
+          {% if p.unrealized_mid_pct is not none %}
+          <span class="muted" style="font-weight:400;">({{ "%+.1f"|format(p.unrealized_mid_pct) }}%)</span>
+          {% endif %}
+        </td>
+        <td style="text-align:right; color:{{ 'var(--ok)' if p.unrealized_executable >= 0 else 'var(--bad)' }};">
+          ${{ "%.2f"|format(p.unrealized_executable) }}
+        </td>
+        <td style="text-align:right;">{{ "%.1f"|format(p.days_open) }}</td>
+        <td style="text-align:right;">
+          {% if p.days_to_resolve is not none %}
+          {{ "%.0f"|format(p.days_to_resolve) }}d
+          {% else %}
+          <span class="muted">?</span>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+</div>
+
+{% if settled_positions %}
+<div class="card">
+  <h3>Recent settled fills (last {{ settled_positions|length }})</h3>
+  <table>
+    <tr>
+      <th>Pair</th>
+      <th>Leg</th>
+      <th>Side</th>
+      <th>Filled @</th>
+      <th>Outcome</th>
+      <th style="text-align:right;">Realized PnL</th>
+      <th>Settled</th>
+    </tr>
+    {% for s in settled_positions %}
+    <tr>
+      <td><code style="font-size:11px;">{{ s.pair_id[:35] }}</code></td>
+      <td>{{ s.leg }}</td>
+      <td>{{ s.side }}</td>
+      <td>{{ "%.4f"|format(s.price_filled) }}</td>
+      <td>{{ s.realized_outcome }}</td>
+      <td style="text-align:right; color:{{ 'var(--ok)' if (s.realized_pnl_usd or 0) >= 0 else 'var(--bad)' }};">
+        ${{ "%.2f"|format(s.realized_pnl_usd or 0) }}
+      </td>
+      <td style="font-size:11px;">{{ s.settle_method }}</td>
+    </tr>
+    {% endfor %}
+  </table>
+</div>
+{% else %}
+<div class="card">
+  <h3>Settled fills</h3>
+  <p class="muted">No settled fills yet. Markets resolve days-to-months out;
+    daily 04:45 UTC <code>settle_paper_fills.py</code> cron will populate
+    realized PnL as they close. Earliest expected resolution: Champions
+    League final May 31 (~25 days).</p>
+</div>
+{% endif %}
+
+{% if daily_pnl %}
+<div class="card">
+  <h3>Daily realized PnL (last 30 days, settled only)</h3>
+  <table>
+    <tr><th>Day</th><th style="text-align:right;">PnL</th><th style="text-align:right;">Fills</th></tr>
+    {% for d in daily_pnl %}
+    <tr>
+      <td>{{ d.day }}</td>
+      <td style="text-align:right; color:{{ 'var(--ok)' if (d.pnl or 0) >= 0 else 'var(--bad)' }};">
+        ${{ "%.2f"|format(d.pnl or 0) }}
+      </td>
+      <td style="text-align:right;">{{ d.n_fills }}</td>
+    </tr>
+    {% endfor %}
+  </table>
+</div>
+{% endif %}
+
+<p class="muted" style="font-size:12px;">
+  Page is live but does not auto-refresh. Reload manually for fresh mtm
+  (WS listener updates Polymarket prices sub-second; Kalshi updates
+  hourly via cron). Raw JSON at
+  <a href="{{ url_for('pnl') }}?fmt=json">?fmt=json</a>.
+</p>
+
+{% endblock %}
