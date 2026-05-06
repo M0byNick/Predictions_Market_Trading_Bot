@@ -4,15 +4,17 @@
 
 <div class="card" style="background:#fafafa;">
   <strong>Filter by tier:</strong>
-  <a href="{{ url_for('queue_list', tier='safest') }}">Safest</a> |
+  <a href="{{ url_for('queue_list', tier='safest') }}" {% if tier=='safest' %}style="font-weight:bold;"{% endif %}>Safest</a> |
   <a href="{{ url_for('queue_list', tier='review') }}" {% if tier=='review' %}style="font-weight:bold;"{% endif %}>Review-recommended</a> |
-  <a href="{{ url_for('queue_list', tier='ambig') }}">Ambiguous</a> |
-  <a href="{{ url_for('queue_list', tier='all') }}">All</a>
+  <a href="{{ url_for('queue_list', tier='ambig') }}" {% if tier=='ambig' %}style="font-weight:bold;"{% endif %}>Ambiguous</a> |
+  <a href="{{ url_for('queue_list', tier='all') }}" {% if tier=='all' %}style="font-weight:bold;"{% endif %}>All</a>
   &nbsp;&nbsp;
   <a href="{{ url_for('queue', tier=tier) }}" style="font-size:13px;">(switch to one-at-a-time view)</a>
   <div class="muted" style="margin-top:6px; font-size:13px;">
     Bulk view shows {{ rows|length }} of {{ total }} pending in this tier.
-    Use checkboxes + the bulk button at the bottom to approve/reject many at once.
+    Use per-row buttons for fast individual decisions, or checkboxes + the
+    bulk button for many at once. Inline buttons share the global tag /
+    reason settings in the sticky bar.
   </div>
 </div>
 
@@ -48,12 +50,17 @@
     <label><input type="checkbox" id="select-all"> Select all on page</label>
     &nbsp;&nbsp;<span id="selection-count">0</span> selected
     &nbsp;&nbsp;
-    <select name="tag">
-      <option value="clean">approve as: clean</option>
-      <option value="high_risk">approve as: high_risk</option>
+    <select name="tag" id="global-tag">
+      <option value="clean">tag: clean</option>
+      <option value="high_risk">tag: high_risk</option>
     </select>
+    <input type="text" name="reason" id="global-reason" placeholder="reject reason (opt)"
+           style="font-size:12px; padding:4px 8px; width:200px;">
     <button type="submit" name="action" value="approve" onclick="return collectIds(this)">Approve selected</button>
     <button type="submit" name="action" value="reject" class="reject" onclick="return collectIds(this)">Reject selected</button>
+    <span style="margin-left:24px; font-size:11px; color:var(--muted);">
+      ↳ inline buttons below use these settings
+    </span>
   </div>
 
   <table>
@@ -66,12 +73,12 @@
         <th>Kalshi</th>
         <th>Polymarket</th>
         <th>Edge-case warnings</th>
-        <th>Quick</th>
+        <th>Action</th>
       </tr>
     </thead>
     <tbody>
     {% for r in rows %}
-      <tr>
+      <tr {% if r.match == 'ambiguous' %}style="background:#fdf6e3;"{% elif r.edge_case_flags_parsed|length >= 3 %}style="background:#fef0e0;"{% endif %}>
         <td><input type="checkbox" class="row-cb" data-cid="{{ r.candidate_id }}"></td>
         <td>
           <span class="pill {% if r.match=='yes' %}pill-clean{% elif r.match=='ambiguous' %}pill-amb{% else %}pill-high{% endif %}">{{ r.match }}</span>
@@ -98,8 +105,20 @@
             </div>
           {% endfor %}
         </td>
-        <td style="font-size:11px;">
-          <a href="{{ url_for('queue', tier=tier, focus=r.candidate_id) }}">→ details</a>
+        <td style="font-size:11px; white-space:nowrap;">
+          <button type="button" class="single-approve"
+                  data-cid="{{ r.candidate_id }}"
+                  style="font-size:10px; padding:2px 6px; background:#1f7a1f;">
+            ✓ approve
+          </button>
+          <button type="button" class="single-reject reject"
+                  data-cid="{{ r.candidate_id }}"
+                  style="font-size:10px; padding:2px 6px;">
+            ✕ reject
+          </button>
+          <br>
+          <a href="{{ url_for('queue', tier=tier, focus=r.candidate_id) }}"
+             style="font-size:10px;">→ details</a>
         </td>
       </tr>
     {% endfor %}
@@ -146,5 +165,51 @@ function collectIds(btn) {
   }
   return true;
 }
+
+// Per-row inline approve buttons -- build a single-cand POST to /approve/<cid>
+document.querySelectorAll('.single-approve').forEach(btn => {
+  btn.addEventListener('click', e => {
+    e.preventDefault();
+    const cid = btn.dataset.cid;
+    const tag = document.getElementById('global-tag').value;
+    const form = document.createElement('form');
+    form.method = 'POST';
+    form.action = '/approve/' + encodeURIComponent(cid);
+    [
+      ['tag', tag],
+      ['tier', '{{ tier }}'],
+      ['notes', 'inline approve from /queue/list'],
+    ].forEach(([k, v]) => {
+      const i = document.createElement('input');
+      i.name = k; i.value = v;
+      form.appendChild(i);
+    });
+    document.body.appendChild(form);
+    form.submit();
+  });
+});
+
+// Per-row inline reject buttons -- build a single-cand POST to /reject/<cid>
+document.querySelectorAll('.single-reject').forEach(btn => {
+  btn.addEventListener('click', e => {
+    e.preventDefault();
+    const cid = btn.dataset.cid;
+    const reason = document.getElementById('global-reason').value || 'inline reject from /queue/list';
+    if (!confirm('Reject candidate #' + cid + '?')) return;
+    const form = document.createElement('form');
+    form.method = 'POST';
+    form.action = '/reject/' + encodeURIComponent(cid);
+    [
+      ['reason', reason],
+      ['tier', '{{ tier }}'],
+    ].forEach(([k, v]) => {
+      const i = document.createElement('input');
+      i.name = k; i.value = v;
+      form.appendChild(i);
+    });
+    document.body.appendChild(form);
+    form.submit();
+  });
+});
 </script>
 {% endblock %}
