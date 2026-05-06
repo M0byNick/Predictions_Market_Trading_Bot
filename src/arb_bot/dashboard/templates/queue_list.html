@@ -58,6 +58,8 @@
            style="font-size:12px; padding:4px 8px; width:200px;">
     <button type="submit" name="action" value="approve" onclick="return collectIds(this)">Approve selected</button>
     <button type="submit" name="action" value="reject" class="reject" onclick="return collectIds(this)">Reject selected</button>
+    &nbsp;|&nbsp;
+    <button type="button" id="toggle-rules" style="background:#888;">Expand all rules</button>
     <span style="margin-left:24px; font-size:11px; color:var(--muted);">
       ↳ inline buttons below use these settings
     </span>
@@ -92,11 +94,11 @@
         <td>{{ "%.0f%%" % (r.confidence * 100) }}</td>
         <td style="max-width:300px;">
           <div style="font-size:13px;"><strong>{{ (r.k_title or '')[:90] }}</strong></div>
-          <div class="muted" style="font-size:12px;">YES {{ r.k_yes_bid }}/{{ r.k_yes_ask }}</div>
+          <div class="muted" style="font-size:12px;">YES {{ r.k_yes_bid }}/{{ r.k_yes_ask }} • vol ${{ "{:,.0f}".format(r.k_volume or 0) }}</div>
         </td>
         <td style="max-width:300px;">
           <div style="font-size:13px;"><strong>{{ (r.p_title or '')[:90] }}</strong></div>
-          <div class="muted" style="font-size:12px;">YES {{ r.p_yes_bid }}/{{ r.p_yes_ask }}</div>
+          <div class="muted" style="font-size:12px;">YES {{ r.p_yes_bid }}/{{ r.p_yes_ask }} • vol ${{ "{:,.0f}".format(r.p_volume or 0) }}</div>
         </td>
         <td style="max-width:280px; font-size:11px;">
           {% for f in r.edge_case_flags_parsed %}
@@ -119,6 +121,67 @@
           <br>
           <a href="{{ url_for('queue', tier=tier, focus=r.candidate_id) }}"
              style="font-size:10px;">→ details</a>
+        </td>
+      </tr>
+      {# Collapsible rules / description / reasoning row #}
+      <tr class="rules-row" {% if r.match == 'ambiguous' %}style="background:#fdf6e3;"{% elif r.edge_case_flags_parsed|length >= 3 %}style="background:#fef0e0;"{% endif %}>
+        <td colspan="8" style="padding:0;">
+          <details class="rules-details">
+            <summary style="cursor:pointer; padding:6px 12px; color:#666; font-size:12px; user-select:none;">
+              ▸ show full rules + LLM reasoning
+            </summary>
+            <div style="padding:10px 16px; background:#fafafa; border-top:1px solid var(--line); font-size:13px;">
+              {% if r.normalized_question %}
+                <div style="margin-bottom:10px;">
+                  <strong>LLM-normalized question:</strong>
+                  <span class="muted">{{ r.normalized_question }}</span>
+                </div>
+              {% endif %}
+              {% if r.reasoning %}
+                <div style="margin-bottom:10px;">
+                  <strong>LLM reasoning:</strong>
+                  <span class="muted">{{ r.reasoning }}</span>
+                </div>
+              {% endif %}
+              {% if r.divergence_reason %}
+                <div style="margin-bottom:10px; color:#a83232;">
+                  <strong>⚠ Divergence reason:</strong> {{ r.divergence_reason }}
+                </div>
+              {% endif %}
+              {% if r.edge_case_flags_parsed %}
+                <div style="margin-bottom:10px;">
+                  <strong>Edge-case warnings:</strong>
+                  <ul style="margin:4px 0 0 16px;">
+                    {% for f in r.edge_case_flags_parsed %}
+                      <li><strong>{{ f.name }}</strong>: <span class="muted">{{ f.why }}</span></li>
+                    {% endfor %}
+                  </ul>
+                </div>
+              {% endif %}
+              <div class="row" style="margin-top:12px;">
+                <div class="card" style="background:#fff;">
+                  <h4 style="margin:0 0 6px 0; font-size:13px;">📍 Kalshi: <code>{{ r.kalshi_ticker }}</code></h4>
+                  <div><strong>Title:</strong> {{ r.k_title }}</div>
+                  {% if r.k_desc %}<div style="margin-top:6px;"><strong>Description:</strong> <span class="muted">{{ r.k_desc }}</span></div>{% endif %}
+                  {% if r.k_rules %}<div style="margin-top:6px;"><strong>Resolution criteria:</strong> <span class="muted">{{ r.k_rules }}</span></div>{% endif %}
+                  {% if r.k_source %}<div class="muted" style="margin-top:6px;"><strong>Resolution source:</strong> {{ r.k_source }}</div>{% endif %}
+                  <div class="muted" style="margin-top:6px; font-size:11px;">
+                    Close time: {{ r.k_close }} (unix)
+                  </div>
+                </div>
+                <div class="card" style="background:#fff;">
+                  <h4 style="margin:0 0 6px 0; font-size:13px;">📍 Polymarket: <code>{{ r.poly_global_market_id[:24] }}…</code></h4>
+                  <div><strong>Title:</strong> {{ r.p_title }}</div>
+                  {% if r.p_desc %}<div style="margin-top:6px;"><strong>Description:</strong> <span class="muted">{{ r.p_desc }}</span></div>{% endif %}
+                  {% if r.p_rules %}<div style="margin-top:6px;"><strong>Resolution criteria:</strong> <span class="muted">{{ r.p_rules }}</span></div>{% endif %}
+                  {% if r.p_source %}<div class="muted" style="margin-top:6px;"><strong>Resolution source:</strong> {{ r.p_source }}</div>{% endif %}
+                  <div class="muted" style="margin-top:6px; font-size:11px;">
+                    Close time: {{ r.p_close }} (unix)
+                  </div>
+                </div>
+              </div>
+            </div>
+          </details>
         </td>
       </tr>
     {% endfor %}
@@ -164,6 +227,17 @@ function collectIds(btn) {
     return false;
   }
   return true;
+}
+
+// "Expand all rules" toggle — opens/closes every <details> on the page.
+const toggleBtn = document.getElementById('toggle-rules');
+if (toggleBtn) {
+  toggleBtn.addEventListener('click', () => {
+    const allDetails = document.querySelectorAll('details.rules-details');
+    const anyClosed = Array.from(allDetails).some(d => !d.open);
+    allDetails.forEach(d => d.open = anyClosed);
+    toggleBtn.textContent = anyClosed ? 'Collapse all rules' : 'Expand all rules';
+  });
 }
 
 // Per-row inline approve buttons -- build a single-cand POST to /approve/<cid>

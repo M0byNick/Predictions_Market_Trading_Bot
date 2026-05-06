@@ -508,6 +508,13 @@ def create_app() -> Flask:
                        v.match_polarity, v.edge_case_flags, v.normalized_question,
                        v.divergence_reason, v.reasoning,
                        m1.title AS k_title, m2.title AS p_title,
+                       m1.description AS k_desc, m2.description AS p_desc,
+                       m1.resolution_criteria AS k_rules,
+                       m2.resolution_criteria AS p_rules,
+                       m1.resolution_source AS k_source,
+                       m2.resolution_source AS p_source,
+                       m1.close_time AS k_close, m2.close_time AS p_close,
+                       m1.volume AS k_volume, m2.volume AS p_volume,
                        m1.yes_bid AS k_yes_bid, m1.yes_ask AS k_yes_ask,
                        m2.yes_bid AS p_yes_bid, m2.yes_ask AS p_yes_ask
             """ + base + tier_clauses.get(tier, "")
@@ -807,17 +814,23 @@ def create_app() -> Flask:
                     reject_reasons[sig.reject_reason or "(unknown)"] = (
                         reject_reasons.get(sig.reject_reason or "(unknown)", 0) + 1
                     )
-                # Pull titles for display
+                # Pull rich market data for display
                 kal = conn.execute(
-                    "SELECT title FROM markets WHERE venue='kalshi' AND venue_market_id=?",
+                    "SELECT title, description, resolution_criteria, "
+                    "resolution_source, close_time, volume, status, last_seen_ts "
+                    "FROM markets WHERE venue='kalshi' AND venue_market_id=?",
                     (p["kalshi_ticker"],),
                 ).fetchone()
                 poly = conn.execute(
-                    "SELECT title FROM markets WHERE venue='poly_global' AND venue_market_id=?",
+                    "SELECT title, description, resolution_criteria, "
+                    "resolution_source, close_time, volume, status, last_seen_ts "
+                    "FROM markets WHERE venue='poly_global' AND venue_market_id=?",
                     (p["poly_global_market_id"],),
                 ).fetchone()
                 rows.append({
                     "pair_id": sig.pair_id,
+                    "kalshi_ticker": p["kalshi_ticker"],
+                    "poly_global_market_id": p["poly_global_market_id"],
                     "polarity": sig.polarity,
                     "kal_yes": sig.kalshi_yes_mid,
                     "poly_yes": sig.poly_yes_mid,
@@ -830,6 +843,20 @@ def create_app() -> Flask:
                     "reject_reason": sig.reject_reason,
                     "k_title": (kal["title"] if kal else "") or "",
                     "p_title": (poly["title"] if poly else "") or "",
+                    "k_desc": (kal["description"] if kal else "") or "",
+                    "p_desc": (poly["description"] if poly else "") or "",
+                    "k_rules": (kal["resolution_criteria"] if kal else "") or "",
+                    "p_rules": (poly["resolution_criteria"] if poly else "") or "",
+                    "k_source": (kal["resolution_source"] if kal else "") or "",
+                    "p_source": (poly["resolution_source"] if poly else "") or "",
+                    "k_close": (kal["close_time"] if kal else None),
+                    "p_close": (poly["close_time"] if poly else None),
+                    "k_volume": (kal["volume"] if kal else 0) or 0,
+                    "p_volume": (poly["volume"] if poly else 0) or 0,
+                    "k_status": (kal["status"] if kal else "") or "",
+                    "p_status": (poly["status"] if poly else "") or "",
+                    "k_last_seen": (kal["last_seen_ts"] if kal else None),
+                    "p_last_seen": (poly["last_seen_ts"] if poly else None),
                 })
 
         # Top opportunities by fee-adjusted edge — only would-trade signals

@@ -92,6 +92,8 @@
       <button type="submit" class="reject" onclick="return collectIds(this)">
         Deactivate selected
       </button>
+      &nbsp;|&nbsp;
+      <button type="button" id="toggle-rules" style="background:#888;">Expand all rules</button>
     </div>
     <table>
       <thead>
@@ -139,6 +141,47 @@
             <button type="button" class="reject single-deact"
                     data-pid="{{ r.pair_id }}"
                     style="font-size:10px; padding:2px 6px;">deact</button>
+          </td>
+        </tr>
+        <tr {% if r.edge_bps > 1000 %}style="background:#ffe7e7;"{% elif r.edge_bps > 500 %}style="background:#fef0e0;"{% endif %}>
+          <td colspan="11" style="padding:0;">
+            <details class="rules-details">
+              <summary style="cursor:pointer; padding:6px 12px; color:#666; font-size:12px; user-select:none;">
+                ▸ show full rules + resolution criteria + market metadata
+              </summary>
+              <div style="padding:10px 16px; background:#fafafa; border-top:1px solid var(--line); font-size:13px;">
+                <div class="row">
+                  <div class="card" style="background:#fff;">
+                    <h4 style="margin:0 0 6px 0; font-size:13px;">📍 Kalshi: <code>{{ r.kalshi_ticker }}</code>
+                      <span style="font-size:11px; font-weight:normal; color:#666;">
+                        • status={{ r.k_status }}
+                        {% if r.k_last_seen %} • last seen {{ r.k_last_seen }}{% endif %}
+                        • vol ${{ "{:,.0f}".format(r.k_volume or 0) }}
+                      </span>
+                    </h4>
+                    <div><strong>Title:</strong> {{ r.k_title }}</div>
+                    {% if r.k_desc %}<div style="margin-top:6px;"><strong>Description:</strong> <span class="muted">{{ r.k_desc }}</span></div>{% endif %}
+                    {% if r.k_rules %}<div style="margin-top:6px;"><strong>Resolution criteria:</strong> <span class="muted">{{ r.k_rules }}</span></div>{% endif %}
+                    {% if r.k_source %}<div class="muted" style="margin-top:6px;"><strong>Resolution source:</strong> {{ r.k_source }}</div>{% endif %}
+                    {% if r.k_close %}<div class="muted" style="margin-top:6px; font-size:11px;">Close: {{ r.k_close }} (unix)</div>{% endif %}
+                  </div>
+                  <div class="card" style="background:#fff;">
+                    <h4 style="margin:0 0 6px 0; font-size:13px;">📍 Polymarket: <code>{{ r.poly_global_market_id[:24] }}…</code>
+                      <span style="font-size:11px; font-weight:normal; color:#666;">
+                        • status={{ r.p_status }}
+                        {% if r.p_last_seen %} • last seen {{ r.p_last_seen }}{% endif %}
+                        • vol ${{ "{:,.0f}".format(r.p_volume or 0) }}
+                      </span>
+                    </h4>
+                    <div><strong>Title:</strong> {{ r.p_title }}</div>
+                    {% if r.p_desc %}<div style="margin-top:6px;"><strong>Description:</strong> <span class="muted">{{ r.p_desc }}</span></div>{% endif %}
+                    {% if r.p_rules %}<div style="margin-top:6px;"><strong>Resolution criteria:</strong> <span class="muted">{{ r.p_rules }}</span></div>{% endif %}
+                    {% if r.p_source %}<div class="muted" style="margin-top:6px;"><strong>Resolution source:</strong> {{ r.p_source }}</div>{% endif %}
+                    {% if r.p_close %}<div class="muted" style="margin-top:6px; font-size:11px;">Close: {{ r.p_close }} (unix)</div>{% endif %}
+                  </div>
+                </div>
+              </div>
+            </details>
           </td>
         </tr>
       {% endfor %}
@@ -218,6 +261,17 @@ function collectIds(btn) {
     return false;
   }
   return confirm(`Deactivate ${ids.length} pair(s)? They'll be hidden from /dry_run and the bot will skip them. Reactivate from /approved?status=inactive.`);
+}
+
+// "Expand all rules" toggle
+const toggleBtn = document.getElementById('toggle-rules');
+if (toggleBtn) {
+  toggleBtn.addEventListener('click', () => {
+    const allDetails = document.querySelectorAll('details.rules-details');
+    const anyClosed = Array.from(allDetails).some(d => !d.open);
+    allDetails.forEach(d => d.open = anyClosed);
+    toggleBtn.textContent = anyClosed ? 'Collapse all rules' : 'Expand all rules';
+  });
 }
 
 // Single-row "deact" buttons: submit a one-pair POST
