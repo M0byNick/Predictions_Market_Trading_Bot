@@ -9,14 +9,15 @@ Result: every paper signal generated against gamma-only data is bogus.
 This script overrides the stored Polymarket yes_bid/yes_ask using the
 authoritative CLOB book endpoint for every active approved pair.
 
-Cost per cycle: 2 HTTP calls per pair (1 gamma to resolve YES token id,
-1 clob to fetch top-of-book). For ~500 active pairs at 1 req/s rate
-limit: ~17 min. Acceptable for hourly cron alongside the gamma ingest.
+Phase 1 perf (May 6 2026): batched gamma + 10 req/s rate. Polymarket's
+documented limits are: gamma /markets 300/10s, CLOB /book 1500/10s.
+At 10 req/s we're 15-90x under the limits. ~534 pairs in ~60 seconds.
 
 Usage:
     python scripts/refresh_poly_clob.py            # all active pairs
     python scripts/refresh_poly_clob.py --limit 50 # cap for testing
     python scripts/refresh_poly_clob.py --pair-id <id>  # single pair
+    python scripts/refresh_poly_clob.py --batch-size 50  # gamma chunk
 
 The script is idempotent and safe to run alongside the existing
 gamma ingest — it only writes the four price columns + last_seen_ts.
@@ -44,60 +45,109 @@ GAMMA_BASE = "https://gamma-api.polymarket.com"
 CLOB_BASE = "https://clob.polymarket.com"
 SESSION = requests.Session()
 SESSION.headers.update({"User-Agent": "Mozilla/5.0 (arb-bot/refresh)"})
-RATE_LIMIT_SEC = 0.6  # ~1.6 req/s; both endpoints accept this
+
+# Phase 1 rate limit: 10 req/s = 100 req/10s. Documented limits are
+# gamma /markets=300/10s and CLOB /book=1500/10s, so 15-90x headroom.
+# If we ever see Cloudflare 429s, bump this back up.
+RATE_LIMIT_SEC = 0.1
+
+# Gamma /markets accepts comma-separated condition_ids. URL length limit
+# is ~8KB; each conditionId is 66 chars + "," = ~67 chars. 50 IDs = ~3.4KB,
+# well within safe URL length.
+GAMMA_BATCH_DEFAULT = 50
+
+# Treat |new - old| > BIG_DELTA as evidence the gamma cache was wildly
+# stale. Logged so chronic-drift markets are visible across runs.
+BIG_DELTA = 0.10
 
 
 def _get(url: str, params: dict | None = None) -> dict | list:
-    r = SESSION.get(url, params=params, timeout=15)
+    r = SESSION.get(url, params=params, timeout=20)
+    if r.status_code == 429:
+        # Cloudflare throttle — back off and retry once
+        retry_after = int(r.headers.get("Retry-After", "2"))
+        time.sleep(min(retry_after, 10))
+        r = SESSION.get(url, params=params, timeout=20)
     r.raise_for_status()
     return r.json()
 
 
-def _resolve_yes_token(condition_id: str) -> tuple[str | None, str | None]:
-    """Return (yes_clob_token_id, market_question) or (None, None)."""
-    data = _get(f"{GAMMA_BASE}/markets",
-                params={"condition_ids": condition_id})
-    if not isinstance(data, list) or not data:
-        return None, None
-    m = data[0]
-    raw = m.get("clobTokenIds") or "[]"
-    try:
-        tokens = json.loads(raw) if isinstance(raw, str) else raw
-    except Exception:
-        return None, m.get("question")
-    if not tokens:
-        return None, m.get("question")
-    return str(tokens[0]), m.get("question")
+def _resolve_yes_tokens_batch(
+    condition_ids: list[str],
+) -> dict[str, tuple[str | None, str | None]]:
+    """Batch-resolve YES clob_token_ids via gamma /markets?condition_ids=A,B,...
+
+    Returns: {condition_id: (yes_token_id_or_None, question_or_None)}.
+    Missing entries (gamma didn't return that conditionId) get (None, None).
+    """
+    if not condition_ids:
+        return {}
+    out: dict[str, tuple[str | None, str | None]] = {
+        cid: (None, None) for cid in condition_ids
+    }
+    # Gamma expects repeated query params, not comma-separated:
+    #   ?condition_ids=A&condition_ids=B&condition_ids=C
+    # requests encodes a list value into repeated params automatically.
+    # IMPORTANT: gamma's default `limit` is 20 — without overriding, a
+    # 50-id batch silently returns only 20 rows. Set limit=batch+slack.
+    data = _get(
+        f"{GAMMA_BASE}/markets",
+        params={
+            "condition_ids": condition_ids,
+            "limit": max(len(condition_ids) * 2, 100),
+        },
+    )
+    items = data if isinstance(data, list) else (data.get("data") or [])
+    for m in items:
+        cid = m.get("conditionId")
+        if not cid:
+            continue
+        raw = m.get("clobTokenIds") or "[]"
+        try:
+            tokens = json.loads(raw) if isinstance(raw, str) else raw
+        except Exception:
+            out[cid] = (None, m.get("question"))
+            continue
+        if not tokens:
+            out[cid] = (None, m.get("question"))
+        else:
+            out[cid] = (str(tokens[0]), m.get("question"))
+    return out
 
 
-def _fetch_clob_top_of_book(token_id: str) -> tuple[float | None, float | None, float | None]:
+def _fetch_clob_top_of_book(
+    token_id: str,
+) -> tuple[float | None, float | None, float | None]:
     """Return (yes_bid, yes_ask, mid) from /book; falls back to /midpoint."""
     try:
         b = _get(f"{CLOB_BASE}/book", params={"token_id": token_id})
         bids = b.get("bids") or []
         asks = b.get("asks") or []
-        # bids sorted ascending in API; best bid = max price
         best_bid = max((float(x["price"]) for x in bids), default=None)
-        # asks: best ask = min price
         best_ask = min((float(x["price"]) for x in asks), default=None)
         if best_bid is not None and best_ask is not None:
             return best_bid, best_ask, (best_bid + best_ask) / 2.0
     except Exception:
         pass
-    # fallback: midpoint endpoint
     try:
         d = _get(f"{CLOB_BASE}/midpoint", params={"token_id": token_id})
         mid = float(d.get("mid"))
-        # synth tight spread; not ideal but better than gamma stale
         return mid - 0.005, mid + 0.005, mid
     except Exception:
         return None, None, None
+
+
+def _chunked(seq: list[str], n: int):
+    for i in range(0, len(seq), n):
+        yield seq[i:i + n]
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--pair-id", type=str, default=None)
+    parser.add_argument("--batch-size", type=int, default=GAMMA_BATCH_DEFAULT,
+                        help=f"gamma batch size (default {GAMMA_BATCH_DEFAULT})")
     parser.add_argument("--verbose", "-v", action="store_true")
     args = parser.parse_args()
 
@@ -115,6 +165,8 @@ def main() -> int:
     cfg = load_config()
     init_schema(cfg.db_path)
 
+    t0 = time.monotonic()
+
     with connect(cfg.db_path) as conn:
         if args.pair_id:
             rows = conn.execute(
@@ -128,46 +180,71 @@ def main() -> int:
                 sql += f" LIMIT {int(args.limit)}"
             rows = conn.execute(sql).fetchall()
 
-        log.info("refreshing CLOB prices for %d active approved pairs", len(rows))
-        seen_cond: dict[str, tuple[float | None, float | None, float | None, str | None]] = {}
+        # Dedupe condition_ids (multiple pairs can share the same poly market)
+        cond_to_pairs: dict[str, list[str]] = {}
+        for r in rows:
+            cid = r["poly_global_market_id"]
+            if not cid:
+                continue
+            cond_to_pairs.setdefault(cid, []).append(r["pair_id"])
+        unique_cids = list(cond_to_pairs.keys())
+
+        log.info(
+            "refreshing CLOB prices: %d pairs / %d unique condition_ids",
+            len(rows), len(unique_cids),
+        )
+
+        # Phase A: batch-resolve all YES tokens via gamma
+        token_map: dict[str, tuple[str | None, str | None]] = {}
+        n_gamma_calls = 0
+        for chunk in _chunked(unique_cids, args.batch_size):
+            time.sleep(RATE_LIMIT_SEC)
+            try:
+                resolved = _resolve_yes_tokens_batch(chunk)
+            except Exception as e:
+                log.warning("gamma batch failed (%d ids): %s — falling back per-id", len(chunk), e)
+                resolved = {}
+                for cid in chunk:
+                    time.sleep(RATE_LIMIT_SEC)
+                    try:
+                        single = _resolve_yes_tokens_batch([cid])
+                        resolved.update(single)
+                    except Exception as e2:
+                        log.warning("  per-id fallback failed for %s: %s", cid[:20], e2)
+                        resolved[cid] = (None, None)
+            token_map.update(resolved)
+            n_gamma_calls += 1
+        log.info("gamma resolved: %d tokens via %d batched calls",
+                 sum(1 for tk, _ in token_map.values() if tk), n_gamma_calls)
+
+        # Phase B: per-token CLOB book fetch + db update
         n_ok = 0
         n_no_token = 0
         n_no_book = 0
-        n_changed_big = 0  # |new - old| > 0.10 -> probably was very stale
-        BIG_DELTA = 0.10
+        n_changed_big = 0
+        n_clob_calls = 0
 
-        for i, r in enumerate(rows, 1):
-            cond_id = r["poly_global_market_id"]
-            if not cond_id:
+        for i, cid in enumerate(unique_cids, 1):
+            yes_token, question = token_map.get(cid, (None, None))
+            if not yes_token:
+                n_no_token += 1
+                if args.verbose:
+                    log.debug("no YES token: %s (%s)", cid[:20],
+                              (question or cond_to_pairs[cid][0])[:60])
                 continue
-            # Memoize per condition_id (multiple pairs can share, e.g. same poly market)
-            if cond_id in seen_cond:
-                yb, ya, mid, q = seen_cond[cond_id]
-            else:
-                time.sleep(RATE_LIMIT_SEC)
-                token_id, question = _resolve_yes_token(cond_id)
-                if not token_id:
-                    n_no_token += 1
-                    log.warning("no YES token for %s (%s)", cond_id[:20], r["pair_id"][:60])
-                    seen_cond[cond_id] = (None, None, None, question)
-                    continue
-                time.sleep(RATE_LIMIT_SEC)
-                yb, ya, mid = _fetch_clob_top_of_book(token_id)
-                q = question
-                seen_cond[cond_id] = (yb, ya, mid, question)
-                if mid is None:
-                    n_no_book += 1
-                    log.warning("no CLOB book for %s (%s)", cond_id[:20], (question or '')[:60])
-                    continue
 
+            time.sleep(RATE_LIMIT_SEC)
+            yb, ya, mid = _fetch_clob_top_of_book(yes_token)
+            n_clob_calls += 1
             if mid is None:
+                n_no_book += 1
+                log.warning("no CLOB book for %s (%s)", cid[:20], (question or '')[:60])
                 continue
 
-            # Old stored
             old = conn.execute(
                 "SELECT yes_bid, yes_ask FROM markets "
                 "WHERE venue='poly_global' AND venue_market_id=?",
-                (cond_id,)
+                (cid,)
             ).fetchone()
             old_mid = None
             if old and old["yes_bid"] is not None and old["yes_ask"] is not None:
@@ -182,30 +259,27 @@ def main() -> int:
                    SET yes_bid=?, yes_ask=?, no_bid=?, no_ask=?, last_seen_ts=?
                  WHERE venue='poly_global' AND venue_market_id=?
                 """,
-                (yb, ya, no_bid, no_ask, now_ts, cond_id),
+                (yb, ya, no_bid, no_ask, now_ts, cid),
             )
             conn.commit()
             n_ok += 1
             if old_mid is not None and abs(mid - old_mid) > BIG_DELTA:
                 n_changed_big += 1
                 log.info(
-                    "BIG MOVE %s: gamma_mid=%.3f -> clob_mid=%.3f (Δ=%+.3f) %s",
-                    cond_id[:20], old_mid, mid, mid - old_mid,
-                    (q or r["pair_id"])[:60],
-                )
-            elif args.verbose:
-                log.debug(
-                    "%s: %.3f (was %.3f)",
-                    cond_id[:20], mid,
-                    old_mid if old_mid is not None else float('nan'),
+                    "BIG MOVE %s: was=%.3f -> clob=%.3f (Δ=%+.3f) %s",
+                    cid[:20], old_mid, mid, mid - old_mid,
+                    (question or cond_to_pairs[cid][0])[:60],
                 )
 
-            if i % 25 == 0:
-                log.info("progress: %d/%d", i, len(rows))
+            if i % 100 == 0:
+                log.info("progress: %d/%d", i, len(unique_cids))
 
+        elapsed = time.monotonic() - t0
         log.info(
-            "done. updated=%d  big_moves=%d  no_token=%d  no_book=%d",
-            n_ok, n_changed_big, n_no_token, n_no_book,
+            "done in %.1fs. updated=%d  big_moves=%d  no_token=%d  no_book=%d  "
+            "(gamma_calls=%d clob_calls=%d)",
+            elapsed, n_ok, n_changed_big, n_no_token, n_no_book,
+            n_gamma_calls, n_clob_calls,
         )
     return 0
 
