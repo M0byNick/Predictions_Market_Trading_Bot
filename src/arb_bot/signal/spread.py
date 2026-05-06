@@ -38,6 +38,7 @@ UNKNOWN POLARITY
   manual override via the dashboard's polarity radio.
 """
 import logging
+import math
 import sqlite3
 import time
 from dataclasses import dataclass
@@ -46,9 +47,49 @@ from arb_bot.config import Config
 
 log = logging.getLogger(__name__)
 
-# Fee assumptions (paper; tune when live venue data is connected).
-KALSHI_FEE_BPS = 70  # ~0.7% Kalshi taker side, paper conservative estimate
-POLY_GLOBAL_FEE_BPS = 200  # 2.0% Polymarket Global TAKER fee (0% maker; arb generally crosses)
+# Per-trade fee model. Both venues' fees depend on the leg's price, so a
+# single flat-bps constant under/over-states the cost depending on where
+# the legs trade. Using actual formulas tightens the threshold and avoids
+# false-positive signals on near-50/50 contracts (where flat-bps was too
+# generous) and false-negatives on tail contracts (where it was too harsh).
+#
+# Kalshi standard taker fee per contract (universal across series for
+# takers; the `quadratic_with_maker_fees` schedule on NBA only differs
+# in whether MAKERS pay -- takers pay the same):
+#     fee = 0.07 * P * (1 - P)
+# Kalshi rounds this up to the next penny per fill; we omit the ceil to
+# keep the signal model continuous and let the slippage knob below absorb
+# the small under-estimate.
+def _kalshi_taker_fee_per_contract(price: float) -> float:
+    """Kalshi taker fee in dollars per contract at the given fill price."""
+    p = max(0.0, min(1.0, price))
+    return 0.07 * p * (1.0 - p)
+
+
+# Polymarket Global taker fee per contract: 2% of the contract dollar
+# value (0% for makers; arb crosses so we always pay taker). Some markets
+# have a market-specific `taker_base_fee` in the gamma payload; default
+# 200 bps applied when unset.
+POLY_GLOBAL_TAKER_FEE_RATE = 0.02
+
+def _poly_taker_fee_per_contract(price: float) -> float:
+    """Polymarket taker fee in dollars per contract at the given fill price."""
+    p = max(0.0, min(1.0, price))
+    return POLY_GLOBAL_TAKER_FEE_RATE * p
+
+
+def _round_trip_fee_bps(kal_mid: float, poly_mid: float) -> float:
+    """Round-trip fee in basis points of $1 contract notional.
+
+    For an arb pair we cross the book on both legs, so we pay both
+    venues' taker fees per contract. Returned in bps so it can be
+    subtracted directly from `raw_spread * 10_000`.
+    """
+    fee_per_contract = (
+        _kalshi_taker_fee_per_contract(kal_mid)
+        + _poly_taker_fee_per_contract(poly_mid)
+    )
+    return fee_per_contract * 10_000  # dollars-on-$1-notional -> bps
 
 
 @dataclass
@@ -74,9 +115,17 @@ def _mid(bid: float | None, ask: float | None) -> float | None:
     return (bid + ask) / 2.0
 
 
-def _sum_fee_bps() -> int:
-    """Round-trip fee assumption: both legs charged on each venue."""
-    return KALSHI_FEE_BPS + POLY_GLOBAL_FEE_BPS
+def _round_trip_slippage_bps(cfg: Config) -> float:
+    """Per-pair round-trip slippage budget in bps.
+
+    Real fills cross the spread + eat tick-size depth on both legs.
+    Paper-mode fills assume mid prices, so we subtract this conservative
+    buffer from realized edge before deciding to trade. Tunable via
+    SLIPPAGE_BPS_PER_LEG -- default 50 bps/leg = 100 bps round-trip is
+    conservative for liquid pairs and tight on thin Polymarket markets.
+    Tighten/loosen after live data confirms.
+    """
+    return 2 * cfg.slippage_bps_per_leg
 
 
 def _capital_per_unit(polarity: str, kal_mid: float, poly_mid: float) -> float:
@@ -113,12 +162,20 @@ def _compute_size_units(
 
 
 def _detect_same_polarity(
-    pair_id: str, kal_mid: float, poly_mid: float
+    cfg: Config, pair_id: str, kal_mid: float, poly_mid: float
 ) -> tuple[float, float, str]:
-    """Returns (raw_spread, fee_adjusted_edge_bps, direction)."""
+    """Returns (raw_spread, fee_adjusted_edge_bps, direction).
+
+    Fee model: per-trade Kalshi+Polymarket taker fees evaluated at the
+    actual fill prices, plus round-trip slippage budget from cfg.
+    """
     raw_spread = abs(kal_mid - poly_mid)
     raw_edge_bps = raw_spread * 10_000
-    fee_adjusted_edge_bps = raw_edge_bps - _sum_fee_bps()
+    fee_adjusted_edge_bps = (
+        raw_edge_bps
+        - _round_trip_fee_bps(kal_mid, poly_mid)
+        - _round_trip_slippage_bps(cfg)
+    )
     if kal_mid < poly_mid:
         direction = "buy_kalshi_yes_sell_poly_yes"
     elif poly_mid < kal_mid:
@@ -129,13 +186,21 @@ def _detect_same_polarity(
 
 
 def _detect_inverse_polarity(
-    pair_id: str, kal_mid: float, poly_mid: float
+    cfg: Config, pair_id: str, kal_mid: float, poly_mid: float
 ) -> tuple[float, float, str]:
-    """Returns (raw_spread, fee_adjusted_edge_bps, direction)."""
+    """Returns (raw_spread, fee_adjusted_edge_bps, direction).
+
+    Fee model: per-trade Kalshi+Polymarket taker fees evaluated at the
+    actual fill prices, plus round-trip slippage budget from cfg.
+    """
     sum_yes = kal_mid + poly_mid
     raw_spread = abs(sum_yes - 1.0)
     raw_edge_bps = raw_spread * 10_000
-    fee_adjusted_edge_bps = raw_edge_bps - _sum_fee_bps()
+    fee_adjusted_edge_bps = (
+        raw_edge_bps
+        - _round_trip_fee_bps(kal_mid, poly_mid)
+        - _round_trip_slippage_bps(cfg)
+    )
     if sum_yes > 1.0:
         direction = "sell_both_yes_inverse"
     elif sum_yes < 1.0:
@@ -212,11 +277,11 @@ def detect_for_pair(conn: sqlite3.Connection, cfg: Config, pair_row: sqlite3.Row
 
     if polarity == "same":
         raw_spread, fee_adjusted_edge_bps, direction = _detect_same_polarity(
-            pair_row["pair_id"], kal_mid, poly_mid
+            cfg, pair_row["pair_id"], kal_mid, poly_mid
         )
     elif polarity == "inverse":
         raw_spread, fee_adjusted_edge_bps, direction = _detect_inverse_polarity(
-            pair_row["pair_id"], kal_mid, poly_mid
+            cfg, pair_row["pair_id"], kal_mid, poly_mid
         )
     else:
         # unknown — refuse to compute a signal at all

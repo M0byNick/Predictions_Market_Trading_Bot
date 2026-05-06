@@ -86,6 +86,12 @@ class KalshiClient:
         contracts) to filter at the API layer — `100` matches Tracker_Kalshi's
         Phase-1 default and cuts to ~10-20K liquid markets.
 
+        `mve_filter=exclude` drops multivariate-event combo markets, which
+        are ~96% noise per Tracker_Kalshi's empirical Phase-1 audit
+        (docs/findings/2026-04-11_phase1_bulk_pull.md). Without this
+        filter, MVE markets dominate raw market count but have ~zero real
+        volume and pollute the embedding/candidate-pair pool.
+
         Note: Kalshi's API uses status='active' rather than 'open'; we
         accept 'active' from the venue but normalize to 'open' downstream.
         """
@@ -95,6 +101,7 @@ class KalshiClient:
                 "status": "open",  # Kalshi API filter; venue still echoes status='active' on rows
                 "limit": limit,
                 "min_volume": min_volume,
+                "mve_filter": "exclude",  # drop multivariate-event combo markets (96% noise)
             }
             if cursor:
                 params["cursor"] = cursor
