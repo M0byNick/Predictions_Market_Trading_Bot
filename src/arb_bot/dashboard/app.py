@@ -660,6 +660,20 @@ def create_app() -> Flask:
         return redirect(url_for("queue_list", tier=return_tier,
                                 flag=return_flag, page=return_page))
 
+    @app.get("/pnl")
+    def pnl():
+        """Paper-trading PnL: realized + unrealized mark-to-market.
+
+        Query ?fmt=json returns the full state dict (used by external
+        monitors / scripted alerts).
+        """
+        from arb_bot.dashboard.pnl import compute_pnl_state
+        with db() as conn:
+            state = compute_pnl_state(conn)
+        if request.args.get("fmt") == "json":
+            return jsonify(state)
+        return render_template("pnl.html", **state)
+
     @app.get("/stats")
     def stats():
         """Approval-rate-over-time + per-model + per-tier accuracy."""
