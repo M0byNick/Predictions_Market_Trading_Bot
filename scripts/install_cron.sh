@@ -21,6 +21,10 @@ COLLECT="*/30 5-23 * * * cd \"$ARB_BOT\" && \"$PYTHON\" \"$ARB_BOT/scripts/run_c
 HOURLY_INGEST="15 * * * * cd \"$ARB_BOT\" && \"$PYTHON\" \"$ARB_BOT/scripts/run_daily_pipeline.py\" --skip-batch >> \"$LOGDIR/cron_hourly.out\" 2>&1"
 SETTLE="45 4 * * * cd \"$ARB_BOT\" && \"$PYTHON\" \"$ARB_BOT/scripts/settle_paper_fills.py\" >> \"$LOGDIR/cron_settle.out\" 2>&1"
 SIGNAL_CYCLE="*/30 * * * * cd \"$ARB_BOT\" && \"$PYTHON\" \"$ARB_BOT/scripts/dry_run_signals.py\" --commit >> \"$LOGDIR/cron_signal.out\" 2>&1"
+# CLOB refresh (overrides stale gamma-api prices for active approved pairs).
+# Hourly @ :40 -- runs AFTER hourly gamma ingest @ :15 (for fresh metadata)
+# and BEFORE the :00 signal cycle (so signals see fresh CLOB prices).
+POLY_CLOB="40 * * * * cd \"$ARB_BOT\" && \"$PYTHON\" \"$ARB_BOT/scripts/refresh_poly_clob.py\" >> \"$LOGDIR/cron_poly_clob.out\" 2>&1"
 
 echo "=== Proposed cron entries (Arb_Bot pipeline) ==="
 echo
@@ -39,13 +43,16 @@ echo
 echo "# Every 30 min — run signal cycle, write paper_signals + paper_fills"
 echo "$SIGNAL_CYCLE"
 echo
+echo "# Every hour at :40 — refresh Polymarket prices via CLOB (gamma is stale)"
+echo "$POLY_CLOB"
+echo
 
 if [[ "${1:-}" == "--apply" ]]; then
     mkdir -p "$LOGDIR"
     # Remove any prior arb_bot lines, then append new ones
     EXISTING="$(crontab -l 2>/dev/null | grep -v 'Arb_Bot/scripts/' || true)"
-    NEW=$(printf "%s\n# Arb_Bot daily pipeline (auto-installed)\n%s\n%s\n%s\n%s\n%s\n" \
-        "$EXISTING" "$DAILY" "$COLLECT" "$HOURLY_INGEST" "$SETTLE" "$SIGNAL_CYCLE")
+    NEW=$(printf "%s\n# Arb_Bot daily pipeline (auto-installed)\n%s\n%s\n%s\n%s\n%s\n%s\n" \
+        "$EXISTING" "$DAILY" "$COLLECT" "$HOURLY_INGEST" "$SETTLE" "$SIGNAL_CYCLE" "$POLY_CLOB")
     echo "$NEW" | crontab -
     echo "INSTALLED. Verify with: crontab -l"
 else
