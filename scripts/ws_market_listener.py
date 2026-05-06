@@ -30,6 +30,7 @@ import argparse
 import asyncio
 import json
 import logging
+import os
 import sqlite3
 import sys
 import time
@@ -61,6 +62,11 @@ BACKOFF_CAP = 60.0
 # Refresh the subscription set from the db every N minutes so newly-
 # approved pairs get picked up without a process restart.
 RESUB_INTERVAL_MIN = 30
+
+# Health-status JSON file -- written periodically by the listener and
+# read by the dashboard's /ws_status route.
+STATUS_FILE = _ARB_ROOT / "data" / "ws_listener_status.json"
+STATUS_WRITE_INTERVAL_SEC = 10
 
 
 def _setup_logging(verbose: bool) -> logging.Logger:
@@ -118,7 +124,11 @@ def _apply_book_update(
 ) -> bool:
     """Compute top-of-book from bids/asks arrays, update markets row.
 
-    Returns True if a write happened (with a meaningful price).
+    Returns True if a write happened (with a meaningful price). On
+    sqlite lock contention with the dashboard, logs and skips this
+    one update — never crashes the WS connection. Polymarket sends
+    book snapshots every 10s anyway so a missed write is recovered
+    on the next event for that token.
     """
     try:
         best_bid = max((float(x["price"]) for x in bids), default=None)
@@ -131,16 +141,20 @@ def _apply_book_update(
     no_bid = 1.0 - best_ask
     no_ask = 1.0 - best_bid
     now_ts = int(time.time())
-    conn.execute(
-        """
-        UPDATE markets
-           SET yes_bid=?, yes_ask=?, no_bid=?, no_ask=?, last_seen_ts=?
-         WHERE venue='poly_global' AND venue_market_id=?
-        """,
-        (best_bid, best_ask, no_bid, no_ask, now_ts, cond_id),
-    )
-    conn.commit()
-    return True
+    try:
+        conn.execute(
+            """
+            UPDATE markets
+               SET yes_bid=?, yes_ask=?, no_bid=?, no_ask=?, last_seen_ts=?
+             WHERE venue='poly_global' AND venue_market_id=?
+            """,
+            (best_bid, best_ask, no_bid, no_ask, now_ts, cond_id),
+        )
+        conn.commit()
+        return True
+    except sqlite3.OperationalError as e:
+        log.debug("book write skipped (%s): %s", cond_id[:20], e)
+        return False
 
 
 def _apply_price_change(
@@ -161,16 +175,73 @@ def _apply_price_change(
     no_bid = 1.0 - best_ask
     no_ask = 1.0 - best_bid
     now_ts = int(time.time())
-    conn.execute(
-        """
-        UPDATE markets
-           SET yes_bid=?, yes_ask=?, no_bid=?, no_ask=?, last_seen_ts=?
-         WHERE venue='poly_global' AND venue_market_id=?
-        """,
-        (best_bid, best_ask, no_bid, no_ask, now_ts, cond_id),
-    )
-    conn.commit()
-    return True
+    try:
+        conn.execute(
+            """
+            UPDATE markets
+               SET yes_bid=?, yes_ask=?, no_bid=?, no_ask=?, last_seen_ts=?
+             WHERE venue='poly_global' AND venue_market_id=?
+            """,
+            (best_bid, best_ask, no_bid, no_ask, now_ts, cond_id),
+        )
+        conn.commit()
+        return True
+    except sqlite3.OperationalError as e:
+        log.debug("price_change write skipped (%s): %s", cond_id[:20], e)
+        return False
+
+
+def _state_snapshot(
+    state: dict,
+    n_book: int,
+    n_price: int,
+    n_other: int,
+    n_filtered: int,
+    last_message_wall_ts: float,
+) -> dict:
+    """Build the dict written to ws_listener_status.json each tick.
+
+    Combines per-session counters with cross-session state (process pid,
+    boot time, cumulative reconnect count).
+    """
+    return {
+        # process-level (across reconnects)
+        "pid": os.getpid(),
+        "process_started_wall_ts": state.get("process_started_wall_ts"),
+        "reconnect_count": state.get("reconnect_count", 0),
+        # current session
+        "session_started_wall_ts": state.get("session_started_wall_ts"),
+        "connection_status": state.get("connection_status", "unknown"),
+        "subscription_count": state.get("subscription_count", 0),
+        "last_message_wall_ts": last_message_wall_ts,
+        "n_book": n_book,
+        "n_price_change": n_price,
+        "n_filtered": n_filtered,
+        "n_other": n_other,
+        # cumulative across reconnects
+        "cum_book": state.get("cum_book", 0) + n_book,
+        "cum_price_change": state.get("cum_price_change", 0) + n_price,
+    }
+
+
+def _write_status(state: dict, log: logging.Logger) -> None:
+    """Atomically dump the listener's runtime stats for the dashboard.
+
+    Tmpfile + rename so the dashboard never sees a half-written file.
+    """
+    try:
+        STATUS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = STATUS_FILE.with_suffix(".tmp")
+        # Add wall-clock timestamps next to monotonic ones so the
+        # dashboard can compute "X sec ago" without sharing the listener's
+        # monotonic clock.
+        snapshot = dict(state)
+        snapshot["written_at"] = time.time()
+        with tmp.open("w") as f:
+            json.dump(snapshot, f, indent=2, default=str)
+        tmp.replace(STATUS_FILE)
+    except Exception as e:
+        log.debug("status write failed: %s", e)
 
 
 async def run_once(
@@ -178,11 +249,14 @@ async def run_once(
     token_to_cond: dict[str, str],
     log: logging.Logger,
     duration: float | None = None,
+    state: dict | None = None,
 ) -> tuple[int, int]:
     """One connect-subscribe-listen cycle. Returns (n_book, n_price_change).
 
     Raises on disconnect; caller wraps with backoff loop.
     """
+    if state is None:
+        state = {}
     if not token_to_cond:
         log.error("no token_ids to subscribe to; aborting")
         return (0, 0)
@@ -199,6 +273,11 @@ async def run_once(
     t_start = time.monotonic()
     deadline = t_start + duration if duration else None
     next_heartbeat_at = t_start + 60  # first log after 60s, then every 60s
+    next_status_write_at = t_start + STATUS_WRITE_INTERVAL_SEC
+    last_message_wall_ts = time.time()
+    state["session_started_wall_ts"] = time.time()
+    state["subscription_count"] = len(token_to_cond)
+    state["connection_status"] = "connecting"
 
     async with websockets.connect(
         WS_URL,
@@ -208,6 +287,9 @@ async def run_once(
     ) as ws:
         await ws.send(json.dumps(sub))
         log.info("subscription sent; entering recv loop")
+        state["connection_status"] = "connected"
+        _write_status(_state_snapshot(state, n_book, n_price, n_other,
+                                      n_filtered, last_message_wall_ts), log)
 
         while True:
             if deadline:
@@ -222,6 +304,7 @@ async def run_once(
                 raw = await ws.recv()
 
             # Server sends both single objects and arrays of objects
+            last_message_wall_ts = time.time()
             try:
                 msg = json.loads(raw)
             except json.JSONDecodeError:
@@ -292,12 +375,22 @@ async def run_once(
                     elapsed, n_book, n_price, n_other, n_filtered,
                 )
                 next_heartbeat_at = now + 60
+            if now >= next_status_write_at:
+                _write_status(_state_snapshot(state, n_book, n_price, n_other,
+                                              n_filtered, last_message_wall_ts), log)
+                next_status_write_at = now + STATUS_WRITE_INTERVAL_SEC
 
     elapsed = time.monotonic() - t_start
     log.info(
         "session ended after %.1fs  book=%d  price_change=%d  other=%d  filtered=%d",
         elapsed, n_book, n_price, n_other, n_filtered,
     )
+    # Roll session counters into cumulative running totals so /ws_status
+    # shows lifetime numbers, not just current-session numbers.
+    state["cum_book"] = state.get("cum_book", 0) + n_book
+    state["cum_price_change"] = state.get("cum_price_change", 0) + n_price
+    state["connection_status"] = "disconnected"
+    _write_status(_state_snapshot(state, 0, 0, 0, 0, last_message_wall_ts), log)
     return n_book, n_price
 
 
@@ -317,6 +410,12 @@ async def main_async(args: argparse.Namespace) -> int:
     failures = 0
     last_resub = 0.0
     token_to_cond: dict[str, str] = {}
+    state: dict = {
+        "process_started_wall_ts": time.time(),
+        "reconnect_count": 0,
+        "cum_book": 0,
+        "cum_price_change": 0,
+    }
 
     while True:
         # Refresh subscription set on first run + every RESUB_INTERVAL_MIN
@@ -331,28 +430,41 @@ async def main_async(args: argparse.Namespace) -> int:
 
         try:
             with connect(cfg.db_path) as conn:
-                # Use a tight timeout on the connection so the WS loop
-                # doesn't hold a writer lock against the cron.
-                conn.execute("PRAGMA busy_timeout=5000")
+                # Generous busy_timeout so the WS write loop waits out
+                # dashboard reads instead of crashing the connection.
+                # Lock-error-on-write is also caught per-update inside
+                # _apply_book_update / _apply_price_change as a second
+                # line of defense.
+                conn.execute("PRAGMA busy_timeout=15000")
                 await run_once(
                     conn, token_to_cond, log,
                     duration=args.duration,
+                    state=state,
                 )
             failures = 0  # successful session resets backoff
             if args.once or args.duration:
                 return 0
+            # Clean disconnect (e.g. server-initiated close); count as
+            # reconnect so the dashboard sees flap rate.
+            state["reconnect_count"] = state.get("reconnect_count", 0) + 1
         except (websockets.ConnectionClosed,
                 ConnectionResetError, OSError) as e:
             failures += 1
+            state["reconnect_count"] = state.get("reconnect_count", 0) + 1
+            state["connection_status"] = "reconnecting"
             backoff = min(BACKOFF_BASE * (2 ** (failures - 1)), BACKOFF_CAP)
             log.warning("disconnect (%s: %s); reconnecting in %.1fs",
                         type(e).__name__, e, backoff)
             await asyncio.sleep(backoff)
         except KeyboardInterrupt:
             log.info("interrupted; exiting")
+            state["connection_status"] = "stopped"
+            _write_status(_state_snapshot(state, 0, 0, 0, 0, time.time()), log)
             return 0
         except Exception as e:
             failures += 1
+            state["reconnect_count"] = state.get("reconnect_count", 0) + 1
+            state["connection_status"] = "error"
             backoff = min(BACKOFF_BASE * (2 ** (failures - 1)), BACKOFF_CAP)
             log.exception("unexpected error: %s; reconnecting in %.1fs",
                           e, backoff)

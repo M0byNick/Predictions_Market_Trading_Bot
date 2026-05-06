@@ -1,0 +1,158 @@
+{% extends "base.html" %}
+{% block content %}
+
+<h1>WebSocket Listener — Health</h1>
+<p class="muted" style="margin-top:-8px;">
+  Polymarket CLOB market channel
+  <code>wss://ws-subscriptions-clob.polymarket.com/ws/market</code>
+</p>
+
+{% if not status %}
+<div class="card" style="border-left:4px solid var(--bad);">
+  <h3 style="color:var(--bad); margin:0;">⛔ Listener not running</h3>
+  <p>No <code>data/ws_listener_status.json</code> found. The listener writes
+     this file every 10s, so its absence means the daemon isn't running.</p>
+  <p>Start it manually:</p>
+  <pre>nohup .venv/bin/python -u scripts/ws_market_listener.py \
+  >> data/logs/ws_listener.out 2>> data/logs/ws_listener.err &</pre>
+  <p>Or install as a launchd LaunchAgent:</p>
+  <pre>bash scripts/install_ws_listener_launchd.sh --apply</pre>
+</div>
+{% else %}
+
+<div class="card" style="border-left:4px solid {{ health_color }};">
+  <h3 style="color:{{ health_color }}; margin:0;">
+    {{ health_icon }} {{ health_label }}
+  </h3>
+  <p style="margin:4px 0 0 0;">{{ health_detail }}</p>
+</div>
+
+<div class="row">
+  <div class="card">
+    <h3>Process</h3>
+    <dl class="kv">
+      <dt>PID</dt><dd>{{ status.pid }}</dd>
+      <dt>Process uptime</dt><dd>{{ uptime_str }}</dd>
+      <dt>Reconnects</dt>
+      <dd>
+        {{ status.reconnect_count }}
+        {% if reconnect_rate_per_hr > 1 %}
+        <span style="color:var(--warn);">({{ "%.1f"|format(reconnect_rate_per_hr) }}/hr)</span>
+        {% endif %}
+      </dd>
+      <dt>Connection</dt>
+      <dd>
+        <span class="pill pill-{{ 'clean' if status.connection_status == 'connected' else 'high' }}">
+          {{ status.connection_status }}
+        </span>
+      </dd>
+    </dl>
+  </div>
+
+  <div class="card">
+    <h3>Current session</h3>
+    <dl class="kv">
+      <dt>Session uptime</dt><dd>{{ session_uptime_str }}</dd>
+      <dt>Last message</dt>
+      <dd>
+        {% if last_msg_age_sec is none %}
+        <span class="muted">never</span>
+        {% else %}
+        <span style="color:{{ 'var(--ok)' if last_msg_age_sec < 30 else ('var(--warn)' if last_msg_age_sec < 300 else 'var(--bad)') }};">
+          {{ last_msg_age_str }} ago
+        </span>
+        {% endif %}
+      </dd>
+      <dt>Subscribed tokens</dt><dd>{{ status.subscription_count }}</dd>
+      <dt>Throughput</dt>
+      <dd>
+        {% if msg_per_sec is none %}
+        <span class="muted">—</span>
+        {% else %}
+        {{ "%.1f"|format(msg_per_sec) }} msg/s
+        ({{ "%.0f"|format(msg_per_sec * 60) }}/min)
+        {% endif %}
+      </dd>
+    </dl>
+  </div>
+</div>
+
+<div class="row">
+  <div class="card">
+    <h3>Cumulative counters</h3>
+    <dl class="kv">
+      <dt>Cum book snapshots</dt><dd>{{ "{:,}".format(status.cum_book) }}</dd>
+      <dt>Cum price changes</dt><dd>{{ "{:,}".format(status.cum_price_change) }}</dd>
+      <dt>Session book</dt><dd>{{ "{:,}".format(status.n_book) }}</dd>
+      <dt>Session price changes</dt><dd>{{ "{:,}".format(status.n_price_change) }}</dd>
+      <dt>Session filtered</dt>
+      <dd>
+        {{ "{:,}".format(status.n_filtered) }}
+        <span class="muted">(non-subscribed asset_ids in bundled events)</span>
+      </dd>
+    </dl>
+  </div>
+
+  <div class="card">
+    <h3>Market freshness</h3>
+    <p class="muted" style="margin-top:0;">
+      Distribution of <code>last_seen_ts</code> ages for the {{ freshness.total }}
+      Polymarket markets backing active approved pairs.
+    </p>
+    <table>
+      <tr>
+        <th>Age window</th>
+        <th style="text-align:right;">Count</th>
+        <th style="text-align:right;">Pct</th>
+      </tr>
+      {% for label, count, pct, color in freshness.buckets %}
+      <tr>
+        <td>{{ label }}</td>
+        <td style="text-align:right;">{{ count }}</td>
+        <td style="text-align:right; color:{{ color }};">{{ "%.0f"|format(pct) }}%</td>
+      </tr>
+      {% endfor %}
+    </table>
+  </div>
+</div>
+
+{% if stalest %}
+<div class="card">
+  <h3>Stalest 10 active poly pairs</h3>
+  <p class="muted" style="margin-top:0;">
+    These are the pairs the WS isn't pushing updates for. Most are likely
+    closed/orphaned markets that should be deactivated.
+  </p>
+  <table>
+    <tr>
+      <th>Pair</th>
+      <th>Title</th>
+      <th style="text-align:right;">Last seen</th>
+    </tr>
+    {% for r in stalest %}
+    <tr>
+      <td><code style="font-size:11px;">{{ r.kalshi_ticker[:30] }}</code></td>
+      <td>{{ (r.title or '')[:60] }}</td>
+      <td style="text-align:right; color:var(--bad);">
+        {{ r.age_str }}
+      </td>
+    </tr>
+    {% endfor %}
+  </table>
+</div>
+{% endif %}
+
+<p class="muted" style="font-size:12px;">
+  Status file: <code>data/ws_listener_status.json</code> · written every
+  10s · auto-refreshes when this page reloads · raw JSON at
+  <a href="{{ url_for('ws_status') }}?fmt=json">?fmt=json</a>
+</p>
+
+<script>
+  // auto-refresh every 15s so the page stays roughly live
+  setTimeout(function(){ location.reload(); }, 15000);
+</script>
+
+{% endif %}
+
+{% endblock %}

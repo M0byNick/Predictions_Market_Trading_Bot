@@ -3,7 +3,7 @@ import logging
 import time
 from pathlib import Path
 
-from flask import Flask, abort, flash, redirect, render_template, request, url_for
+from flask import Flask, abort, flash, jsonify, redirect, render_template, request, url_for
 
 from arb_bot.config import load_config
 from arb_bot.db import connect, init_schema, transaction
@@ -924,6 +924,160 @@ def create_app() -> Flask:
             "success",
         )
         return redirect(url_for("dry_run"))
+
+    @app.route("/ws_status")
+    def ws_status():
+        """Health page for the Polymarket WebSocket listener.
+
+        Reads data/ws_listener_status.json (written by the listener
+        every 10s) and renders an HTML status board. With ?fmt=json
+        returns the raw JSON, useful for cron-driven alerting.
+        """
+        import json as _json
+        import os as _os
+        cfg = app.config["ARB_CFG"]
+        status_path = cfg.data_dir / "ws_listener_status.json"
+        status: dict | None = None
+        if status_path.exists():
+            try:
+                status = _json.loads(status_path.read_text())
+            except Exception:
+                status = None
+
+        # Process-existence check: even if status file is fresh, if the
+        # listener pid is gone the file is just stale.
+        listener_alive = False
+        if status and status.get("pid"):
+            try:
+                _os.kill(int(status["pid"]), 0)
+                listener_alive = True
+            except (OSError, ValueError):
+                listener_alive = False
+
+        if request.args.get("fmt") == "json":
+            payload = dict(status or {})
+            payload["listener_alive"] = listener_alive
+            payload["server_time"] = time.time()
+            return jsonify(payload)
+
+        # Compute derived fields for the template
+        ctx: dict = {"status": status}
+        if not status:
+            return render_template("ws_status.html", **ctx)
+
+        now = time.time()
+        proc_uptime = now - (status.get("process_started_wall_ts") or now)
+        sess_uptime = now - (status.get("session_started_wall_ts") or now)
+        last_msg_age = (now - status["last_message_wall_ts"]) if status.get("last_message_wall_ts") else None
+        msg_per_sec = None
+        if sess_uptime > 1 and (status.get("n_book", 0) + status.get("n_price_change", 0)) > 0:
+            msg_per_sec = (status.get("n_book", 0) + status.get("n_price_change", 0)) / sess_uptime
+        reconnect_rate = (status.get("reconnect_count", 0) / proc_uptime * 3600.0) if proc_uptime > 60 else 0.0
+
+        # Health verdict
+        if not listener_alive:
+            health_color, health_icon = "var(--bad)", "⛔"
+            health_label = "Process not running"
+            health_detail = (
+                f"Status file says PID {status.get('pid')}, but that process "
+                "no longer exists. Restart the listener."
+            )
+        elif status.get("connection_status") != "connected":
+            health_color, health_icon = "var(--warn)", "⚠"
+            health_label = f"Connection: {status.get('connection_status', 'unknown')}"
+            health_detail = "Listener is alive but not currently connected to the WS endpoint."
+        elif last_msg_age is None or last_msg_age > 300:
+            health_color, health_icon = "var(--bad)", "⛔"
+            health_label = "Connected but silent"
+            health_detail = (
+                f"No messages received in {int(last_msg_age) if last_msg_age else 'N/A'}s. "
+                "Subscription may have failed."
+            )
+        elif last_msg_age > 30:
+            health_color, health_icon = "var(--warn)", "⚠"
+            health_label = "Slow message flow"
+            health_detail = f"Last message {int(last_msg_age)}s ago — connection may be stalling."
+        else:
+            health_color, health_icon = "var(--ok)", "✓"
+            health_label = "Healthy"
+            health_detail = (
+                f"{status.get('subscription_count', 0)} tokens subscribed, "
+                f"~{(msg_per_sec or 0):.0f} msg/s. Last message {int(last_msg_age)}s ago."
+            )
+
+        # Format human-readable durations
+        def _fmt_dur(s: float) -> str:
+            s = int(s)
+            if s < 60:
+                return f"{s}s"
+            if s < 3600:
+                return f"{s//60}m {s%60}s"
+            return f"{s//3600}h {(s%3600)//60}m"
+
+        ctx.update({
+            "listener_alive": listener_alive,
+            "uptime_str": _fmt_dur(proc_uptime),
+            "session_uptime_str": _fmt_dur(sess_uptime),
+            "last_msg_age_sec": last_msg_age,
+            "last_msg_age_str": _fmt_dur(last_msg_age) if last_msg_age else None,
+            "msg_per_sec": msg_per_sec,
+            "reconnect_rate_per_hr": reconnect_rate,
+            "health_color": health_color,
+            "health_icon": health_icon,
+            "health_label": health_label,
+            "health_detail": health_detail,
+        })
+
+        # Market freshness histogram + stalest pairs
+        with db() as conn:
+            buckets_raw = conn.execute(
+                """
+                SELECT
+                  SUM(CASE WHEN ?-last_seen_ts < 30   THEN 1 ELSE 0 END) AS under_30s,
+                  SUM(CASE WHEN ?-last_seen_ts BETWEEN 30 AND 119 THEN 1 ELSE 0 END) AS bw_30_2m,
+                  SUM(CASE WHEN ?-last_seen_ts BETWEEN 120 AND 599 THEN 1 ELSE 0 END) AS bw_2_10m,
+                  SUM(CASE WHEN ?-last_seen_ts BETWEEN 600 AND 3599 THEN 1 ELSE 0 END) AS bw_10_60m,
+                  SUM(CASE WHEN ?-last_seen_ts >= 3600 THEN 1 ELSE 0 END) AS over_60m,
+                  COUNT(*) AS total
+                FROM markets m
+                WHERE m.venue='poly_global'
+                  AND m.venue_market_id IN (
+                    SELECT poly_global_market_id FROM approved_pairs WHERE active=1
+                  )
+                """,
+                (now, now, now, now, now),
+            ).fetchone()
+            total = buckets_raw["total"] or 1
+            buckets = [
+                ("< 30 sec",       buckets_raw["under_30s"],  100*buckets_raw["under_30s"]/total,  "var(--ok)"),
+                ("30 sec – 2 min", buckets_raw["bw_30_2m"],   100*buckets_raw["bw_30_2m"]/total,   "var(--ok)"),
+                ("2 – 10 min",     buckets_raw["bw_2_10m"],   100*buckets_raw["bw_2_10m"]/total,   "var(--warn)"),
+                ("10 – 60 min",    buckets_raw["bw_10_60m"],  100*buckets_raw["bw_10_60m"]/total,  "var(--warn)"),
+                ("> 60 min",       buckets_raw["over_60m"],   100*buckets_raw["over_60m"]/total,   "var(--bad)"),
+            ]
+            ctx["freshness"] = {"total": buckets_raw["total"], "buckets": buckets}
+
+            stalest_rows = conn.execute(
+                """
+                SELECT ap.kalshi_ticker, m.title, m.last_seen_ts
+                FROM approved_pairs ap
+                JOIN markets m ON m.venue='poly_global' AND m.venue_market_id = ap.poly_global_market_id
+                WHERE ap.active=1
+                ORDER BY m.last_seen_ts ASC
+                LIMIT 10
+                """
+            ).fetchall()
+            stalest = []
+            for r in stalest_rows:
+                age = now - (r["last_seen_ts"] or now)
+                stalest.append({
+                    "kalshi_ticker": r["kalshi_ticker"],
+                    "title": r["title"],
+                    "age_str": _fmt_dur(age),
+                })
+            ctx["stalest"] = stalest
+
+        return render_template("ws_status.html", **ctx)
 
     @app.post("/run_now")
     def run_now():
