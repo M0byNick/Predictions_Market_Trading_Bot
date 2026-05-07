@@ -198,6 +198,15 @@ def compute_pnl_state(conn: sqlite3.Connection) -> dict:
         unrealized_exec = 0.0
         entry_capital = 0.0
         fees_paid = 0.0
+        # Settlement PnL = pair-level cash flow locked at entry. For a
+        # well-constructed arb pair, this is deterministic at settlement
+        # (less fees) regardless of outcome -- because long-leg gain
+        # exactly offsets short-leg loss in either YES/NO direction. We
+        # approximate as: (cash received from SELL legs) -
+        # (cash paid for BUY legs) - (fees paid). Negative means the
+        # pair entered at unfavorable prices -- i.e. was phantom-edged.
+        cash_received = 0.0
+        cash_paid = 0.0
         earliest_ts = min(f["ts"] for f in fills)
         k_entry_price, k_entry_side = None, None
         p_entry_price, p_entry_side = None, None
@@ -219,8 +228,12 @@ def compute_pnl_state(conn: sqlite3.Connection) -> dict:
                 if pnl_exec is not None:
                     unrealized_exec += pnl_exec
 
+            cash_amt = f["price_filled"] * f["size_filled"]
             if f["side"] == "buy":
-                entry_capital += f["price_filled"] * f["size_filled"]
+                entry_capital += cash_amt
+                cash_paid += cash_amt
+            elif f["side"] == "sell":
+                cash_received += cash_amt
             fees_paid += f["fees_usd"] or 0
 
             # Latest entry per leg (for display)
@@ -231,6 +244,14 @@ def compute_pnl_state(conn: sqlite3.Connection) -> dict:
                 p_entry_price = f["price_filled"]
                 p_entry_side = f["side"]
 
+        # Pair-level settlement PnL (entry-locked, deterministic for a
+        # correct same-polarity arb): cash_received - cash_paid - fees.
+        # For inverse-polarity arbs (both legs same direction), this
+        # represents net cost/credit; combine with the $1 payoff math
+        # at settlement. The signed result is the right adjudication
+        # metric for "is this pair worth keeping" -- regardless of
+        # current bid/ask volatility.
+        settlement_pnl = cash_received - cash_paid - fees_paid
         days_open = (now_ts - earliest_ts) / 86400.0
         # Resolution time: prefer Polymarket close (cleaner), fall back to Kalshi
         close_time = ap["p_close"] or ap["k_close"]
@@ -257,6 +278,9 @@ def compute_pnl_state(conn: sqlite3.Connection) -> dict:
             "unrealized_executable": round(unrealized_exec, 2),
             "unrealized_mid_pct": (unrealized_mid / entry_capital * 100.0)
                                   if entry_capital > 0 else None,
+            "settlement_pnl_locked": round(settlement_pnl, 2),
+            "settlement_pnl_pct": (settlement_pnl / entry_capital * 100.0)
+                                  if entry_capital > 0 else None,
             "days_open": round(days_open, 2),
             "days_to_resolve": round(days_to_resolve, 1) if days_to_resolve is not None else None,
         })
@@ -264,8 +288,13 @@ def compute_pnl_state(conn: sqlite3.Connection) -> dict:
         total_unrealized_exec += unrealized_exec
         total_open_capital += entry_capital
 
-    # Sort: worst losers at top (so user sees risk first)
-    open_positions.sort(key=lambda x: x["unrealized_mid"])
+    # Sort: worst settlement_pnl_locked at top (so phantom-edged pairs
+    # rise to the top — that's the right adjudication metric for "is
+    # this pair worth keeping," not current bid/ask volatility).
+    open_positions.sort(key=lambda x: x["settlement_pnl_locked"])
+
+    # Aggregate locked settlement PnL across all open pairs.
+    total_settlement_locked = sum(p["settlement_pnl_locked"] for p in open_positions)
 
     # ── 3. Recent settled fills (last 30) ──────────────────────────────
     settled_rows = conn.execute(
@@ -311,6 +340,7 @@ def compute_pnl_state(conn: sqlite3.Connection) -> dict:
             "realized_pnl_today": round(realized_today, 2),
             "unrealized_pnl_mid": round(total_unrealized_mid, 2),
             "unrealized_pnl_executable": round(total_unrealized_exec, 2),
+            "settlement_pnl_locked_total": round(total_settlement_locked, 2),
             "total_pnl_mid": round(realized_total + total_unrealized_mid, 2),
             "open_capital_usd": round(total_open_capital, 2),
             "open_positions_count": len(open_positions),
