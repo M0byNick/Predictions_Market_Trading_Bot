@@ -77,14 +77,19 @@
         <th style="text-align:right;">Cap</th>
         <th style="text-align:right;">Unrealized (mid)</th>
         <th style="text-align:right;">Unrealized (exec)</th>
-        <th style="text-align:right;">Days held</th>
-        <th style="text-align:right;">Days to resolve</th>
+        <th>Action</th>
       </tr>
     </thead>
     <tbody>
       {% for p in open_positions %}
-      <tr>
-        <td><code style="font-size:11px;">{{ p.kalshi_ticker[:28] }}</code></td>
+      {% set is_deeply_negative = p.unrealized_executable < -10 %}
+      <tr {% if is_deeply_negative %}style="background:#fdf3f3;"{% endif %}>
+        <td>
+          <code style="font-size:11px;">{{ p.kalshi_ticker[:28] }}</code>
+          {% if is_deeply_negative %}
+          <br><span class="pill pill-high" style="margin-top:2px;">⚠ exec &lt; -$10</span>
+          {% endif %}
+        </td>
         <td style="font-size:12px;">{{ p.title }}</td>
         <td style="font-size:12px;">
           {{ p.k_entry_side[:1].upper() }}@{{ "%.3f"|format(p.k_entry_price) if p.k_entry_price is not none else '?' }}
@@ -98,24 +103,37 @@
         <td style="text-align:right; color:{{ 'var(--ok)' if p.unrealized_mid >= 0 else 'var(--bad)' }}; font-weight:600;">
           ${{ "%.2f"|format(p.unrealized_mid) }}
           {% if p.unrealized_mid_pct is not none %}
-          <span class="muted" style="font-weight:400;">({{ "%+.1f"|format(p.unrealized_mid_pct) }}%)</span>
+          <br><span class="muted" style="font-weight:400; font-size:11px;">{{ "%+.1f"|format(p.unrealized_mid_pct) }}%</span>
           {% endif %}
         </td>
-        <td style="text-align:right; color:{{ 'var(--ok)' if p.unrealized_executable >= 0 else 'var(--bad)' }};">
+        <td style="text-align:right; color:{{ 'var(--ok)' if p.unrealized_executable >= 0 else 'var(--bad)' }}; font-weight:{{ '600' if is_deeply_negative else '400' }};">
           ${{ "%.2f"|format(p.unrealized_executable) }}
+          <br><span class="muted" style="font-size:11px;">held {{ "%.1f"|format(p.days_open) }}d · left {{ "%.0f"|format(p.days_to_resolve) if p.days_to_resolve is not none else '?' }}d</span>
         </td>
-        <td style="text-align:right;">{{ "%.1f"|format(p.days_open) }}</td>
-        <td style="text-align:right;">
-          {% if p.days_to_resolve is not none %}
-          {{ "%.0f"|format(p.days_to_resolve) }}d
-          {% else %}
-          <span class="muted">?</span>
-          {% endif %}
+        <td style="white-space:nowrap;">
+          <form method="post" action="{{ url_for('deactivate_pair', pair_id=p.pair_id) }}"
+                style="display:inline-flex; gap:4px; align-items:center;"
+                onsubmit="return confirm('Deactivate {{ p.kalshi_ticker }}?\n\nExisting open paper-fills are NOT closed (they settle naturally). Bot will stop generating NEW signals on this pair. Reversible from /approved.');">
+            <input type="hidden" name="return_to" value="pnl">
+            <input type="hidden" name="reason"
+                   value="manual deactivate from /pnl (exec_unrealized=${{ '%.2f'|format(p.unrealized_executable) }})">
+            <button type="submit" class="reject" style="padding:4px 8px; font-size:11px;">
+              Deactivate
+            </button>
+          </form>
+          <a href="{{ url_for('approved_list') }}?q={{ p.kalshi_ticker }}"
+             style="font-size:11px; margin-left:4px;">details</a>
         </td>
       </tr>
       {% endfor %}
     </tbody>
   </table>
+  <p class="muted" style="font-size:11px; margin-top:8px;">
+    Rows shaded red have <strong>exec-close PnL worse than -$10</strong> — the
+    most likely candidates for deactivation. "Deactivate" stops new signals
+    on the pair; existing fills settle naturally. Reversible from
+    <a href="{{ url_for('approved_list') }}?status=inactive">/approved</a>.
+  </p>
   {% endif %}
 </div>
 

@@ -379,6 +379,13 @@ def create_app() -> Flask:
                     (new_notes, pair_id),
                 )
         flash(f"Deactivated {pair_id}", "warning")
+        # Honor an explicit return_to so the deactivate button can be
+        # invoked from /pnl, /dry_run, etc. and bring the user back to
+        # the page they were on, instead of always sending them to
+        # /approved.
+        return_to = request.form.get("return_to")
+        if return_to in ("pnl", "dry_run", "ws_status"):
+            return redirect(url_for(return_to))
         return redirect(url_for(
             "approved_list",
             tag=request.form.get("tag", "all"),
