@@ -3,52 +3,60 @@
 
 <h1>Paper PnL</h1>
 <p class="muted" style="margin-top:-8px;">
-  Realized + unrealized mark-to-market across all open + settled paper trades.
-  Excludes the {{ metrics.fills_wiped }} fills tagged
-  <code>WIPED_PHANTOM_GAMMA</code> (data-integrity wipe, not real outcomes).
+  Pair-level settlement value: every position is the
+  Kalshi-vs-Polymarket spread on the same event, evaluated as a unit.
+  Single-leg mtm is informational. Excludes the {{ metrics.fills_wiped }}
+  fills tagged <code>WIPED_PHANTOM_GAMMA</code> (data-integrity wipe).
   As of {{ as_of_ts | int }}.
 </p>
 
 <div class="row">
   <div class="card">
-    <h3>Total PnL (realized + unrealized mid-mtm)</h3>
+    <h3>Pair Settlement PnL (realized + locked-at-entry)</h3>
+    {% set total_settle = metrics.realized_pnl_total + metrics.settlement_pnl_locked_total %}
     <p style="font-size:36px; font-weight:700; margin:4px 0;
-              color:{{ 'var(--ok)' if metrics.total_pnl_mid >= 0 else 'var(--bad)' }};">
-      ${{ "%.2f"|format(metrics.total_pnl_mid) }}
+              color:{{ 'var(--ok)' if total_settle >= 0 else 'var(--bad)' }};">
+      ${{ "%.2f"|format(total_settle) }}
+    </p>
+    <p class="muted" style="font-size:13px; margin:4px 0 12px 0;">
+      What we expect to collect at settlement, summed across all pairs.
+      For correctly-paired arbs this is deterministic — the
+      Kalshi-vs-Polymarket spread we captured at entry, less fees.
     </p>
     <dl class="kv" style="margin-top:8px;">
-      <dt>Realized (settled)</dt>
+      <dt>Realized (settled fills)</dt>
       <dd style="color:{{ 'var(--ok)' if metrics.realized_pnl_total >= 0 else 'var(--bad)' }};">
         ${{ "%.2f"|format(metrics.realized_pnl_total) }}
       </dd>
-      <dt>Realized today</dt>
-      <dd>${{ "%.2f"|format(metrics.realized_pnl_today) }}</dd>
-      <dt>Settle PnL (locked)</dt>
+      <dt>Locked at entry (open pairs)</dt>
       <dd style="color:{{ 'var(--ok)' if metrics.settlement_pnl_locked_total >= 0 else 'var(--bad)' }}; font-weight:600;">
         ${{ "%.2f"|format(metrics.settlement_pnl_locked_total) }}
       </dd>
-      <dt>Unrealized (mid-mtm)</dt>
-      <dd style="color:{{ 'var(--ok)' if metrics.unrealized_pnl_mid >= 0 else 'var(--bad)' }};">
-        ${{ "%.2f"|format(metrics.unrealized_pnl_mid) }}
-      </dd>
-      <dt>Unrealized (exec close)</dt>
-      <dd style="color:{{ 'var(--ok)' if metrics.unrealized_pnl_executable >= 0 else 'var(--bad)' }};">
-        ${{ "%.2f"|format(metrics.unrealized_pnl_executable) }}
-      </dd>
+      <dt>Realized today</dt>
+      <dd>${{ "%.2f"|format(metrics.realized_pnl_today) }}</dd>
     </dl>
-    <p class="muted" style="font-size:11px; margin-top:8px;">
-      <strong>Settle (locked)</strong> = pair-level cash flow locked at
-      entry; for a correctly-paired arb this is deterministic at expiry
-      regardless of outcome. <strong>This is the right adjudication
-      metric</strong> — negative means the pair entered at unfavorable
-      prices (phantom-edged) and should be deactivated.
-      <br><br>
-      <strong>Mid-mtm</strong> = mark-to-(bid+ask)/2; reflects current
-      market re-pricing of the position. <strong>Exec close</strong> =
-      close longs at bid + shorts at ask; the gap from mid is the bid-ask
-      liquidity tax. Both move with bid/ask volatility but DON'T affect
-      what we collect at settlement.
-    </p>
+    <details style="margin-top:12px;">
+      <summary class="muted" style="font-size:12px; cursor:pointer;">
+        Mark-to-market views (informational only — don't drive decisions)
+      </summary>
+      <dl class="kv" style="margin-top:8px;">
+        <dt>Unrealized (mid-mtm)</dt>
+        <dd style="color:{{ 'var(--ok)' if metrics.unrealized_pnl_mid >= 0 else 'var(--bad)' }};">
+          ${{ "%.2f"|format(metrics.unrealized_pnl_mid) }}
+        </dd>
+        <dt>Unrealized (exec close)</dt>
+        <dd style="color:{{ 'var(--ok)' if metrics.unrealized_pnl_executable >= 0 else 'var(--bad)' }};">
+          ${{ "%.2f"|format(metrics.unrealized_pnl_executable) }}
+        </dd>
+      </dl>
+      <p class="muted" style="font-size:11px; margin-top:8px;">
+        Single-venue mark-to-market values. They fluctuate with bid/ask
+        on each leg independently, but for a paired arb they don't affect
+        what we collect at expiry — both legs snap to deterministic 0/1
+        values at settlement. Useful only as a "what would liquidating
+        cost today" indicator.
+      </p>
+    </details>
   </div>
 
   <div class="card">
