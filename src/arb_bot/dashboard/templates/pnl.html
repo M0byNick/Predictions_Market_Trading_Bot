@@ -23,6 +23,10 @@
       </dd>
       <dt>Realized today</dt>
       <dd>${{ "%.2f"|format(metrics.realized_pnl_today) }}</dd>
+      <dt>Settle PnL (locked)</dt>
+      <dd style="color:{{ 'var(--ok)' if metrics.settlement_pnl_locked_total >= 0 else 'var(--bad)' }}; font-weight:600;">
+        ${{ "%.2f"|format(metrics.settlement_pnl_locked_total) }}
+      </dd>
       <dt>Unrealized (mid-mtm)</dt>
       <dd style="color:{{ 'var(--ok)' if metrics.unrealized_pnl_mid >= 0 else 'var(--bad)' }};">
         ${{ "%.2f"|format(metrics.unrealized_pnl_mid) }}
@@ -33,11 +37,17 @@
       </dd>
     </dl>
     <p class="muted" style="font-size:11px; margin-top:8px;">
-      <strong>mid-mtm</strong> values both legs at midpoint of bid/ask
-      (textbook convention; can overstate). <strong>exec close</strong>
-      values longs at bid + shorts at ask — what you'd actually realize
-      if you closed every position right now. The gap between the two
-      is your liquidity tax.
+      <strong>Settle (locked)</strong> = pair-level cash flow locked at
+      entry; for a correctly-paired arb this is deterministic at expiry
+      regardless of outcome. <strong>This is the right adjudication
+      metric</strong> — negative means the pair entered at unfavorable
+      prices (phantom-edged) and should be deactivated.
+      <br><br>
+      <strong>Mid-mtm</strong> = mark-to-(bid+ask)/2; reflects current
+      market re-pricing of the position. <strong>Exec close</strong> =
+      close longs at bid + shorts at ask; the gap from mid is the bid-ask
+      liquidity tax. Both move with bid/ask volatility but DON'T affect
+      what we collect at settlement.
     </p>
   </div>
 
@@ -75,6 +85,7 @@
         <th>K entry → now</th>
         <th>P entry → now</th>
         <th style="text-align:right;">Cap</th>
+        <th style="text-align:right;" title="Pair PnL locked at entry — deterministic at settlement">Settle (locked)</th>
         <th style="text-align:right;">Unrealized (mid)</th>
         <th style="text-align:right;">Unrealized (exec)</th>
         <th>Action</th>
@@ -82,12 +93,12 @@
     </thead>
     <tbody>
       {% for p in open_positions %}
-      {% set is_deeply_negative = p.unrealized_executable < -10 %}
-      <tr {% if is_deeply_negative %}style="background:#fdf3f3;"{% endif %}>
+      {% set is_phantom = p.settlement_pnl_locked < 0 %}
+      <tr {% if is_phantom %}style="background:#fdf3f3;"{% endif %}>
         <td>
           <code style="font-size:11px;">{{ p.kalshi_ticker[:28] }}</code>
-          {% if is_deeply_negative %}
-          <br><span class="pill pill-high" style="margin-top:2px;">⚠ exec &lt; -$10</span>
+          {% if is_phantom %}
+          <br><span class="pill pill-high" style="margin-top:2px;">⚠ phantom-entry</span>
           {% endif %}
         </td>
         <td style="font-size:12px;">{{ p.title }}</td>
@@ -100,13 +111,19 @@
           → {{ "%.3f"|format(p.p_mid) if p.p_mid is not none else '?' }}
         </td>
         <td style="text-align:right;">${{ "%.2f"|format(p.entry_capital_usd) }}</td>
-        <td style="text-align:right; color:{{ 'var(--ok)' if p.unrealized_mid >= 0 else 'var(--bad)' }}; font-weight:600;">
+        <td style="text-align:right; color:{{ 'var(--ok)' if p.settlement_pnl_locked >= 0 else 'var(--bad)' }}; font-weight:600;">
+          ${{ "%.2f"|format(p.settlement_pnl_locked) }}
+          {% if p.settlement_pnl_pct is not none %}
+          <br><span class="muted" style="font-weight:400; font-size:11px;">{{ "%+.1f"|format(p.settlement_pnl_pct) }}%</span>
+          {% endif %}
+        </td>
+        <td style="text-align:right; color:{{ 'var(--ok)' if p.unrealized_mid >= 0 else 'var(--bad)' }};">
           ${{ "%.2f"|format(p.unrealized_mid) }}
           {% if p.unrealized_mid_pct is not none %}
           <br><span class="muted" style="font-weight:400; font-size:11px;">{{ "%+.1f"|format(p.unrealized_mid_pct) }}%</span>
           {% endif %}
         </td>
-        <td style="text-align:right; color:{{ 'var(--ok)' if p.unrealized_executable >= 0 else 'var(--bad)' }}; font-weight:{{ '600' if is_deeply_negative else '400' }};">
+        <td style="text-align:right; color:{{ 'var(--ok)' if p.unrealized_executable >= 0 else 'var(--bad)' }};">
           ${{ "%.2f"|format(p.unrealized_executable) }}
           <br><span class="muted" style="font-size:11px;">held {{ "%.1f"|format(p.days_open) }}d · left {{ "%.0f"|format(p.days_to_resolve) if p.days_to_resolve is not none else '?' }}d</span>
         </td>
@@ -116,7 +133,7 @@
                 onsubmit="return confirm('Deactivate {{ p.kalshi_ticker }}?\n\nExisting open paper-fills are NOT closed (they settle naturally). Bot will stop generating NEW signals on this pair. Reversible from /approved.');">
             <input type="hidden" name="return_to" value="pnl">
             <input type="hidden" name="reason"
-                   value="manual deactivate from /pnl (exec_unrealized=${{ '%.2f'|format(p.unrealized_executable) }})">
+                   value="manual deactivate from /pnl (settle_locked=${{ '%.2f'|format(p.settlement_pnl_locked) }} exec_now=${{ '%.2f'|format(p.unrealized_executable) }})">
             <button type="submit" class="reject" style="padding:4px 8px; font-size:11px;">
               Deactivate
             </button>
@@ -129,9 +146,16 @@
     </tbody>
   </table>
   <p class="muted" style="font-size:11px; margin-top:8px;">
-    Rows shaded red have <strong>exec-close PnL worse than -$10</strong> — the
-    most likely candidates for deactivation. "Deactivate" stops new signals
-    on the pair; existing fills settle naturally. Reversible from
+    Rows shaded red have <strong>negative locked-at-entry settlement PnL</strong>
+    — the pair entered at unfavorable prices (phantom-edged) and will lose
+    money even if both legs resolve correctly. These are the right
+    deactivation candidates. Sorted worst-locked-PnL-first.
+    <br>
+    Exec/mid columns are informational (they fluctuate with bid/ask) but
+    shouldn't drive deactivation: a real arb pair with locked +$5 will pay
+    $5 at expiry regardless of what mid-mtm shows in between.
+    "Deactivate" stops new signals on the pair; existing fills settle
+    naturally. Reversible from
     <a href="{{ url_for('approved_list') }}?status=inactive">/approved</a>.
   </p>
   {% endif %}
