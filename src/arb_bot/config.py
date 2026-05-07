@@ -72,6 +72,13 @@ class Config:
     # we deduct 2x this from realized edge before deciding to trade. Tighten
     # after live data; conservative default = 50 bps/leg = 100 bps round-trip.
     slippage_bps_per_leg: int
+    # Hard cap on time-to-resolution in days. Pairs resolving farther out
+    # are rejected at signal time -- they tie up capital for too long
+    # relative to the edge captured, killing annualized return. A 5% edge
+    # locked for 18 months annualizes to ~3%; the same 5% in 30 days is
+    # ~80%. Default 90 covers most sports + near-term political events
+    # while excluding multi-quarter "championship/election" markets.
+    max_days_to_resolve: int
 
     # Mapping
     embed_model: str
@@ -156,6 +163,7 @@ def load_config() -> Config:
         paper_min_edge_bps=_env_int("PAPER_MIN_EDGE_BPS", 200),
         max_quote_age_sec=_env_int("MAX_QUOTE_AGE_SEC", 7200),
         slippage_bps_per_leg=_env_int("SLIPPAGE_BPS_PER_LEG", 50),
+        max_days_to_resolve=_env_int("MAX_DAYS_TO_RESOLVE", 90),
         embed_model=_env("EMBED_MODEL", "BAAI/bge-small-en-v1.5"),
         embed_cosine_threshold=_env_float("EMBED_COSINE_THRESHOLD", 0.75),
         candidate_top_k=_env_int("CANDIDATE_TOP_K", 5),

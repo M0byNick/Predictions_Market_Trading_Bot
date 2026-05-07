@@ -122,7 +122,12 @@
         <td style="text-align:right; color:{{ 'var(--ok)' if p.settlement_pnl_locked >= 0 else 'var(--bad)' }}; font-weight:600;">
           ${{ "%.2f"|format(p.settlement_pnl_locked) }}
           {% if p.settlement_pnl_pct is not none %}
-          <br><span class="muted" style="font-weight:400; font-size:11px;">{{ "%+.1f"|format(p.settlement_pnl_pct) }}%</span>
+          <br><span class="muted" style="font-weight:400; font-size:11px;">
+            {{ "%+.1f"|format(p.settlement_pnl_pct) }}%
+            {% if p.annualized_pct is not none %}
+            · <strong>{{ "%+.0f"|format(p.annualized_pct) }}% APY</strong>
+            {% endif %}
+          </span>
           {% endif %}
         </td>
         <td style="text-align:right; color:{{ 'var(--ok)' if p.unrealized_mid >= 0 else 'var(--bad)' }};">

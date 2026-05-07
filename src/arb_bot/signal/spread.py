@@ -105,6 +105,8 @@ class ArbSignal:
     target_capital_usd: float  # planned $ outlay for this position (informational)
     would_trade: bool
     reject_reason: str | None
+    days_to_resolve: float | None = None
+    annualized_edge_bps: float | None = None  # edge × 365 / days; capital-efficiency metric
 
 
 def _mid(bid: float | None, ask: float | None) -> float | None:
@@ -212,12 +214,14 @@ def _detect_inverse_polarity(
 
 def detect_for_pair(conn: sqlite3.Connection, cfg: Config, pair_row: sqlite3.Row) -> ArbSignal | None:
     kal = conn.execute(
-        "SELECT yes_bid, yes_ask, last_seen_ts, status "
+        "SELECT yes_bid, yes_ask, last_seen_ts, status, "
+        "       resolution_time, close_time "
         "FROM markets WHERE venue='kalshi' AND venue_market_id=?",
         (pair_row["kalshi_ticker"],),
     ).fetchone()
     poly = conn.execute(
-        "SELECT yes_bid, yes_ask, last_seen_ts, status "
+        "SELECT yes_bid, yes_ask, last_seen_ts, status, "
+        "       resolution_time, close_time "
         "FROM markets WHERE venue='poly_global' AND venue_market_id=?",
         (pair_row["poly_global_market_id"],),
     ).fetchone()
@@ -272,6 +276,39 @@ def detect_for_pair(conn: sqlite3.Connection, cfg: Config, pair_row: sqlite3.Row
     if kal_mid is None or poly_mid is None:
         return None
 
+    # Time-to-resolution gate. Prefer Polymarket's close_time (cleaner)
+    # then Kalshi's resolution_time, then Kalshi's close_time. If beyond
+    # max_days_to_resolve, refuse the signal: capital tied up that long
+    # destroys annualized return regardless of edge size (5% in 18 mo
+    # = ~3% annualized; 5% in 30 days = ~80%).
+    resolve_ts = (
+        poly["close_time"]
+        or kal["resolution_time"]
+        or kal["close_time"]
+    )
+    days_to_resolve: float | None = None
+    if resolve_ts:
+        days_to_resolve = max(0.0, (resolve_ts - now_ts) / 86400.0)
+        if days_to_resolve > cfg.max_days_to_resolve:
+            return ArbSignal(
+                pair_id=pair_row["pair_id"],
+                polarity=pair_row["match_polarity"] if "match_polarity" in pair_row.keys() else "unknown",
+                kalshi_yes_mid=kal_mid,
+                poly_yes_mid=poly_mid,
+                raw_spread=0.0,
+                fee_adjusted_edge_bps=0.0,
+                direction="skip_too_long_to_resolve",
+                size_units=0,
+                target_capital_usd=0.0,
+                would_trade=False,
+                reject_reason=(
+                    f"resolves in {days_to_resolve:.0f}d > "
+                    f"max {cfg.max_days_to_resolve}d (capital-locked too long)"
+                ),
+                days_to_resolve=days_to_resolve,
+                annualized_edge_bps=None,
+            )
+
     polarity = (pair_row["match_polarity"] if "match_polarity" in pair_row.keys()
                 else "unknown") or "unknown"
 
@@ -323,6 +360,13 @@ def detect_for_pair(conn: sqlite3.Connection, cfg: Config, pair_row: sqlite3.Row
         would_trade = False
         reject_reason = "high_risk pair: excluded from paper v1 trading"
 
+    # Annualized edge = capital-efficiency metric. A 5% edge in 30 days
+    # = ~80% APY; same 5% in 18 months = ~3% APY. Used by the signal
+    # cycle's display (sort key) and by the dashboard's PnL view.
+    annualized_edge_bps: float | None = None
+    if days_to_resolve and days_to_resolve > 0:
+        annualized_edge_bps = fee_adjusted_edge_bps * 365.0 / days_to_resolve
+
     return ArbSignal(
         pair_id=pair_row["pair_id"],
         polarity=polarity,
@@ -335,6 +379,8 @@ def detect_for_pair(conn: sqlite3.Connection, cfg: Config, pair_row: sqlite3.Row
         target_capital_usd=target_capital_usd,
         would_trade=would_trade,
         reject_reason=reject_reason,
+        days_to_resolve=days_to_resolve,
+        annualized_edge_bps=annualized_edge_bps,
     )
 
 
