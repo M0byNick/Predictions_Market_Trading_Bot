@@ -260,6 +260,15 @@ def compute_pnl_state(conn: sqlite3.Connection) -> dict:
         title = (ap["k_title"] or ap["p_title"] or pair_id)[:80]
         direction = fills[0]["direction"] if fills[0]["direction"] else "?"
 
+        # Annualized return: locked PnL as % of capital, projected
+        # forward over the total holding period (entry → settlement).
+        # Lets the user compare a +5% return locked for 5 months vs.
+        # +3% locked for 30 days: the latter is much higher APY.
+        total_days_held = days_open + (days_to_resolve or 0.0)
+        annualized_pct: float | None = None
+        if entry_capital > 0 and total_days_held > 0:
+            annualized_pct = (settlement_pnl / entry_capital) * 365.0 / total_days_held * 100.0
+
         open_positions.append({
             "pair_id": pair_id,
             "kalshi_ticker": ap["kalshi_ticker"],
@@ -281,6 +290,7 @@ def compute_pnl_state(conn: sqlite3.Connection) -> dict:
             "settlement_pnl_locked": round(settlement_pnl, 2),
             "settlement_pnl_pct": (settlement_pnl / entry_capital * 100.0)
                                   if entry_capital > 0 else None,
+            "annualized_pct": round(annualized_pct, 1) if annualized_pct is not None else None,
             "days_open": round(days_open, 2),
             "days_to_resolve": round(days_to_resolve, 1) if days_to_resolve is not None else None,
         })

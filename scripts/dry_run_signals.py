@@ -92,20 +92,26 @@ def main() -> int:
                 print(f"  {n:5d}  {r}")
             print()
 
-        # Top would-trade signals
+        # Top would-trade signals — sort by ANNUALIZED edge so faster-resolving
+        # pairs surface first. A 5% edge in 30 days (~80% APY) beats 5% in
+        # 18 months (~3% APY) for the same capital lock.
         trade_sigs = sorted(
             [(p, s) for p, s in signals if s.would_trade],
-            key=lambda x: -x[1].fee_adjusted_edge_bps,
+            key=lambda x: -(x[1].annualized_edge_bps or x[1].fee_adjusted_edge_bps),
         )[: args.top]
         if trade_sigs:
-            print(f"=== Top {len(trade_sigs)} would-trade signals (by edge) ===")
+            print(f"=== Top {len(trade_sigs)} would-trade signals (by ANNUALIZED edge) ===")
             print(f"  {'pol':<7s} {'k_yes':>6s} {'p_yes':>6s} "
-                  f"{'edge_bps':>9s} {'units':>6s} {'capital':>9s}  pair")
+                  f"{'edge':>6s} {'days':>5s} {'APY':>7s} "
+                  f"{'units':>6s} {'capital':>8s}  pair")
             for p, s in trade_sigs:
-                pid = s.pair_id[:60]
+                pid = s.pair_id[:55]
+                days_str = f"{s.days_to_resolve:.0f}" if s.days_to_resolve is not None else "?"
+                apy_str = f"{(s.annualized_edge_bps or 0)/100:.0f}%" if s.annualized_edge_bps else "?"
                 print(f"  {s.polarity:<7s} {s.kalshi_yes_mid:>6.3f} "
-                      f"{s.poly_yes_mid:>6.3f} {s.fee_adjusted_edge_bps:>9.0f} "
-                      f"{s.size_units:>6d} ${s.target_capital_usd:>8.2f}  {pid}")
+                      f"{s.poly_yes_mid:>6.3f} {s.fee_adjusted_edge_bps:>5.0f}bp "
+                      f"{days_str:>5s}d {apy_str:>7s} "
+                      f"{s.size_units:>6d} ${s.target_capital_usd:>7.2f}  {pid}")
             print()
 
             total_capital = sum(s.target_capital_usd for _, s in trade_sigs)
