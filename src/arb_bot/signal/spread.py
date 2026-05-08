@@ -117,6 +117,37 @@ def _mid(bid: float | None, ask: float | None) -> float | None:
     return (bid + ask) / 2.0
 
 
+def _tier_min_edge_bps(cfg: Config, days_to_resolve: float | None) -> int:
+    """Per-tier min-edge threshold scaled by time-to-settlement.
+
+    Same dollar edge has dramatically different annualized return based
+    on holding period. The tiers below scale the user-configured base
+    threshold downward for shorter-dated pairs:
+
+        ≤  3 days  →  40% × base   (e.g. base=200 → 80 bps)
+        4-7 days   →  60% × base   (             → 120 bps)
+        8-14 days  →  85% × base   (             → 170 bps)
+        15+ days   → 100% × base   (             → 200 bps)
+
+    Hard floors prevent the threshold from collapsing to noise on very
+    cheap-to-trade pairs. If days_to_resolve is unknown, use base.
+
+    The MAX_DAYS_TO_RESOLVE hard cap (separate gate) still rejects any
+    pair beyond the configured horizon — this function only governs
+    the edge bar within the allowed window.
+    """
+    base = cfg.paper_min_edge_bps
+    if days_to_resolve is None:
+        return base
+    if days_to_resolve <= 3:
+        return max(50, int(base * 0.40))
+    if days_to_resolve <= 7:
+        return max(80, int(base * 0.60))
+    if days_to_resolve <= 14:
+        return max(120, int(base * 0.85))
+    return base
+
+
 def _round_trip_slippage_bps(cfg: Config) -> float:
     """Per-pair round-trip slippage budget in bps.
 
@@ -288,7 +319,30 @@ def detect_for_pair(conn: sqlite3.Connection, cfg: Config, pair_row: sqlite3.Row
     )
     days_to_resolve: float | None = None
     if resolve_ts:
-        days_to_resolve = max(0.0, (resolve_ts - now_ts) / 86400.0)
+        raw_days = (resolve_ts - now_ts) / 86400.0
+        # Already-past close_time: market should be settled but venue
+        # still reports it as open (status hasn't propagated). Refuse —
+        # entering an already-closed market is strictly bad.
+        if raw_days < 0.0:
+            return ArbSignal(
+                pair_id=pair_row["pair_id"],
+                polarity=pair_row["match_polarity"] if "match_polarity" in pair_row.keys() else "unknown",
+                kalshi_yes_mid=kal_mid,
+                poly_yes_mid=poly_mid,
+                raw_spread=0.0,
+                fee_adjusted_edge_bps=0.0,
+                direction="skip_past_close_time",
+                size_units=0,
+                target_capital_usd=0.0,
+                would_trade=False,
+                reject_reason=(
+                    f"close_time was {-raw_days:.0f}d ago — market should "
+                    f"be settled; venue status hasn't propagated"
+                ),
+                days_to_resolve=raw_days,
+                annualized_edge_bps=None,
+            )
+        days_to_resolve = raw_days
         if days_to_resolve > cfg.max_days_to_resolve:
             return ArbSignal(
                 pair_id=pair_row["pair_id"],
@@ -350,11 +404,14 @@ def detect_for_pair(conn: sqlite3.Connection, cfg: Config, pair_row: sqlite3.Row
             f"${cfg.paper_min_position_usd:.2f} — bankroll too small "
             f"(set INITIAL_BANKROLL_USD higher)"
         )
-    if would_trade and fee_adjusted_edge_bps < cfg.paper_min_edge_bps:
+    tier_threshold = _tier_min_edge_bps(cfg, days_to_resolve)
+    if would_trade and fee_adjusted_edge_bps < tier_threshold:
         would_trade = False
+        days_str = f"{days_to_resolve:.0f}d" if days_to_resolve is not None else "?d"
         reject_reason = (
             f"edge {fee_adjusted_edge_bps:.0f}bps < "
-            f"threshold {cfg.paper_min_edge_bps}bps"
+            f"tier{days_str} threshold {tier_threshold}bps "
+            f"(base={cfg.paper_min_edge_bps}bps)"
         )
     if pair_row["tag"] == "high_risk":
         would_trade = False
